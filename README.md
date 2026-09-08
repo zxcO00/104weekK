@@ -63,11 +63,21 @@ streamlit run app.py
 1. 把整個 repo push 到 GitHub（public repo，或 private + Streamlit 帳號已連結該權限）
 2. 到 [share.streamlit.io](https://share.streamlit.io) → New app
 3. 選擇這個 repo，**Main file path 填 `app.py`**（在 repo 根目錄，不是 `src/app.py`）
-4. Deploy 後每次 push 到主分支會自動重新部署
+4. **點開「Advanced settings」，Python version 選 3.12**（見下方已知坑）
+5. Deploy 後每次 push 到主分支會自動重新部署
 
 網頁版跟 GitHub Actions 排程版共用同一套 `src/` 邏輯模組，改一次 `pattern_detector.py` 兩邊都會同步更新，不用維護兩份程式碼。網頁版的風險金額/匯率可以直接在側邊欄調整，不需要改環境變數。
 
-## 本機執行（排程版 scanner.py）
+#### ⚠️ 已知坑：Python 版本與套件編譯失敗
+
+Streamlit Cloud 目前預設 Python 3.12，但新建 App 有時會被導向最新的 3.14——這個版本太新，pandas/pillow 等套件還沒有預編譯 wheel，會嘗試從原始碼編譯並因缺少系統函式庫（如 zlib）而失敗。
+
+- `runtime.txt` **目前無法可靠指定 Python 版本**（Streamlit 官方已知問題，常被忽略）
+- 正確做法：部署時展開「Advanced settings」，用下拉選單明確選擇 Python 版本（建議 3.12）
+- 部署後無法更改 Python 版本，只能刪除該 App 重新部署
+- `requirements.txt` 用 `>=` 而非 `==` 釘死版本，讓套件管理器能挑到有現成 wheel 的新版本，降低編譯失敗機率
+
+### 本機執行（排程版 scanner.py）
 
 ```bash
 pip install -r requirements.txt
