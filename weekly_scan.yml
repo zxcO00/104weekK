@@ -1,0 +1,48 @@
+name: Weekly Watchlist Boundary Reset Scan
+
+on:
+  schedule:
+    # 每週五 15:30 台灣時間 = UTC 07:30
+    - cron: "30 7 * * 5"
+  workflow_dispatch:  # 允許手動觸發，方便測試
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache Chinese font
+        uses: actions/cache@v4
+        with:
+          path: src/fonts
+          key: taipei-sans-tc-beta-font
+
+      - name: Run scanner
+        working-directory: src
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          POSITION_RISK_AMOUNT_TWD: "10000"
+          USD_TWD_RATE: "32.0"
+        run: python scanner.py
+
+      - name: Upload scan results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-results-${{ github.run_number }}
+          path: |
+            src/output/*.png
+            src/scan_summary.md
+          retention-days: 90
