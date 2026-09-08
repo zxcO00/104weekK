@@ -47,7 +47,27 @@ Telegram / Discord。
 | `POSITION_RISK_AMOUNT_TWD` | 單筆固定風險金額（新台幣，美股會依匯率換算） | 選填，預設 10000 |
 | `USD_TWD_RATE` | 美元兌台幣參考匯率 | 選填，預設 32.0 |
 
-## 本機執行
+## Streamlit 網頁版（app.py）
+
+提供兩個功能頁籤，讓你不用等每週排程就能手動辨識：
+- **全市場掃描**：對整個觀察池跑一次掃描，列出符合條件的標的、可切換查看個別決策圖表
+- **單一標的診斷**：輸入任意代碼（含非觀察池內的標的）立即檢查是否符合回踩條件
+
+### 本機執行網頁版
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### 部署到 Streamlit Community Cloud（streamlit.io）
+1. 把整個 repo push 到 GitHub（public repo，或 private + Streamlit 帳號已連結該權限）
+2. 到 [share.streamlit.io](https://share.streamlit.io) → New app
+3. 選擇這個 repo，**Main file path 填 `app.py`**（在 repo 根目錄，不是 `src/app.py`）
+4. Deploy 後每次 push 到主分支會自動重新部署
+
+網頁版跟 GitHub Actions 排程版共用同一套 `src/` 邏輯模組，改一次 `pattern_detector.py` 兩邊都會同步更新，不用維護兩份程式碼。網頁版的風險金額/匯率可以直接在側邊欄調整，不需要改環境變數。
+
+## 本機執行（排程版 scanner.py）
 
 ```bash
 pip install -r requirements.txt
