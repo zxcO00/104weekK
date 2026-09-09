@@ -83,6 +83,7 @@ with tab_scan:
         table_rows = [
             {
                 "標的": r["name"],
+                "進場模式": "箱型精算" if r["res"].get("entry_mode") == "tight_box" else "舊公式",
                 "入場": round(r["res"]["entry_price"], 2),
                 "動態邊界": round(r["res"]["boundary"], 2),
                 "停損": round(r["res"]["stop_loss"], 2),
@@ -93,17 +94,30 @@ with tab_scan:
             }
             for r in sorted_results
         ]
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
+        st.caption("👆 點選下方表格的任一列，即可顯示對應的決策圖表")
+        event = st.dataframe(
+            pd.DataFrame(table_rows),
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+
+        selected_rows = event["selection"]["rows"]
         st.divider()
-        selected_name = st.selectbox("選擇標的查看決策圖表", [r["name"] for r in sorted_results])
-        chosen = next(r for r in sorted_results if r["name"] == selected_name)
-        try:
-            img_path = plot_and_save(chosen["df"], chosen["ticker"], chosen["name"], chosen["res"],
-                                      output_dir=CHART_DIR)
-            st.image(img_path, use_container_width=True)
-        except Exception as e:
-            st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
+
+        if not selected_rows:
+            st.info("尚未選擇標的，請點選上方表格的某一列。")
+        else:
+            chosen = sorted_results[selected_rows[0]]
+            st.subheader(f"📊 {chosen['name']} 決策圖表")
+            try:
+                img_path = plot_and_save(chosen["df"], chosen["ticker"], chosen["name"], chosen["res"],
+                                          output_dir=CHART_DIR)
+                st.image(img_path, use_container_width=True)
+            except Exception as e:
+                st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
 
 # ============================================================
 # Tab 2：單一標的診斷
@@ -135,6 +149,8 @@ with tab_single:
                     c3.metric("停損", f"{res['stop_loss']:.2f}")
                     c4.metric("停利", f"{res['tp_adam']:.2f}")
                     st.metric("風報比 R/R", f"{res['rr_ratio']:.2f}")
+                    mode_note = "🎯 緊縮箱型精算" if res.get("entry_mode") == "tight_box" else "📐 退回舊公式"
+                    st.caption(f"進場模式：{mode_note}")
 
                     if pos:
                         st.write(f"💰 建議部位：**{pos['unit_display']}**（交割款估計 {pos['currency']} {pos['settlement_estimate']:,.0f}）")
