@@ -69,6 +69,8 @@ def run_scan():
                 f"（交割款: {pos['currency']} {pos['settlement_estimate']:,.0f}"
                 f" | 風險: {pos['currency']} {pos['actual_risk']:,.0f}）"
             )
+        mode_label = "緊縮箱型精算" if res.get("entry_mode") == "tight_box" else "退回舊公式"
+        print(f">> 進場模式: {mode_label}")
         print("=" * 65)
 
         # 第二階段：繪圖（失敗不影響訊號本身，改推純文字通知）
@@ -112,20 +114,21 @@ def write_report(triggers, path="scan_summary.md"):
         sorted_triggers = sorted(triggers, key=lambda t: t["res"]["rr_ratio"], reverse=True)
 
         f.write("### 詳細清單\n\n")
-        f.write("| 標的 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 圖表 |\n")
-        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+        f.write("| 標的 | 進場模式 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 圖表 |\n")
+        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
         for t in sorted_triggers:
             name, res, pos = t["name"], t["res"], t["pos"]
             chart_note = "✅" if t["img_path"] else "⚠️失敗"
+            mode_note = "箱型精算" if res.get("entry_mode") == "tight_box" else "舊公式"
             if pos:
                 f.write(
-                    f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
+                    f"| {name} | {mode_note} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
                     f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | "
                     f"{pos['unit_display']} | {pos['currency']} {pos['settlement_estimate']:,.0f} | {chart_note} |\n"
                 )
             else:
                 f.write(
-                    f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
+                    f"| {name} | {mode_note} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
                     f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | - | - | {chart_note} |\n"
                 )
 
