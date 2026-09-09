@@ -101,6 +101,8 @@ def run_scan():
         print("=" * 65)
         print(f"【本週即時觸發】 {prefix} {name}（日期: {res['date']}）")
         print(f">> 入場價: {res['entry_price']:.2f} | 動態邊界: {res['boundary']:.2f}")
+        if res.get("zone_too_tight"):
+            print(">> ⚠️ 打擊區過窄（反彈高點才發生沒幾根K棒，回檔尚未止穩），停損已套用風險下限")
         print(f">> 防守停損: {res['stop_loss']:.2f} | 目標停利: {res['tp_adam']:.2f} | 風報比: {res['rr_ratio']:.2f}")
         if pos:
             print(
@@ -153,26 +155,28 @@ def write_report(triggers, watchlist=None, path="scan_summary.md"):
             sorted_triggers = sorted(triggers, key=lambda t: t["res"]["rr_ratio"], reverse=True)
 
             f.write("### 正式觸發清單\n\n")
-            f.write("| 標的 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 歷史滿足 | 圖表 |\n")
-            f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+            f.write("| 標的 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 歷史滿足 | 打擊區 | 圖表 |\n")
+            f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
             for t in sorted_triggers:
                 name, res, pos = t["name"], t["res"], t["pos"]
                 chart_note = "✅" if t["img_path"] else "⚠️失敗"
                 hist = t.get("hist") or {"satisfied_count": 0, "total_patterns": 0}
                 hist_note = f"{hist['satisfied_count']}/{hist['total_patterns']}"
+                zone_note = "⚠️過窄" if res.get("zone_too_tight") else "✅"
                 if pos:
                     f.write(
                         f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
                         f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | "
                         f"{pos['unit_display']} | {pos['currency']} {pos['settlement_estimate']:,.0f} | "
-                        f"{hist_note} | {chart_note} |\n"
+                        f"{hist_note} | {zone_note} | {chart_note} |\n"
                     )
                 else:
                     f.write(
                         f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
                         f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | - | - | "
-                        f"{hist_note} | {chart_note} |\n"
+                        f"{hist_note} | {zone_note} | {chart_note} |\n"
                     )
+
 
             f.write("\n### 適合入場精簡清單\n\n")
             for idx, t in enumerate(sorted_triggers, start=1):

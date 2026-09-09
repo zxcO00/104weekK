@@ -218,17 +218,31 @@ def _find_strike_zone(df, retest_start_idx, last_idx):
 # ==============================================================================
 # 狀態 5：老余流風控與停利定錨（Risk / Reward）
 # ==============================================================================
-def _stage5_risk_reward(sweep, reclaim, retest, strike_zone, min_rr, local_low_buffer=0.01):
+def _stage5_risk_reward(sweep, reclaim, retest, strike_zone, min_rr, local_low_buffer=0.01, min_risk_pct=0.02):
     """
     Entry = max(S_current, L_current)
     SL    = 打擊區局部低點（strike_zone.zone_low）外側緩衝（預設 1%）
             —— 不再用狀態2的深洗盤低點，改用「這次回踩打擊區時」的實際低點，
             大幅縮減停損距離、拉高風報比，貼合實盤「吃單守在區間外側」的用法。
+
+            風險下限（min_risk_pct）：當打擊區窗口很窄（例如反彈高點才發生
+            2~3根K棒，回檔還在持續破底、根本還沒止穩）時，局部低點會非常
+            貼近進場價，算出來的停損距離會不合理地小（例如風險只剩0.4元、
+            風報比爆衝到20幾倍）。這種情況通常就是「跟反彈高點黏在一起」
+            的劣質型態（同一種合作夥伴在仁寶手繪圖裡明講不喜歡的樣態），
+            所以停損距離設一個下限（預設進場價的2%），避免出現不切實際的
+            風報比，也讓停損保留基本的緩衝空間。
     TP    = Entry + pattern_height（1:1 翻亞當對稱滿足，維持用 sweep_low 算高度不變）
     風報比濾網：RR >= min_rr
     """
     entry_price = max(retest["boundary_at_current"], retest["curr_low"])
     stop_loss = strike_zone["zone_low"] * (1 - local_low_buffer)
+
+    min_stop_loss_ceiling = entry_price * (1 - min_risk_pct)
+    zone_too_tight = stop_loss > min_stop_loss_ceiling
+    if zone_too_tight:
+        stop_loss = min_stop_loss_ceiling
+
     tp_adam = entry_price + reclaim["pattern_height"]
 
     risk = entry_price - stop_loss
@@ -245,6 +259,7 @@ def _stage5_risk_reward(sweep, reclaim, retest, strike_zone, min_rr, local_low_b
         "risk": float(risk),
         "reward": float(reward),
         "rr_ratio": float(rr_ratio),
+        "zone_too_tight": zone_too_tight,
     }, rr_ratio
 
 
@@ -263,6 +278,7 @@ def detect_boundary_shift(
     touch_tolerance_pct=0.03,
     min_touches=2,
     local_low_buffer=0.01,
+    min_risk_pct=0.02,
 ):
     """
     永遠回傳一個 dict（不再回傳 None）。
@@ -345,7 +361,9 @@ def detect_boundary_shift(
 
         # ---- 狀態 5：風控與停利定錨 ----
         strike_zone = _find_strike_zone(df, reclaim["peak2_idx"] + 1, last_idx)
-        risk_reward, rr_ratio = _stage5_risk_reward(sweep, reclaim, retest, strike_zone, min_rr, local_low_buffer)
+        risk_reward, rr_ratio = _stage5_risk_reward(
+            sweep, reclaim, retest, strike_zone, min_rr, local_low_buffer, min_risk_pct
+        )
         if risk_reward is None:
             _update_best(STATUS_RR_REJECTED, {
                 "sweep_idx": s_idx,
@@ -372,6 +390,7 @@ def detect_boundary_shift(
             "strike_zone_high": strike_zone["zone_high"],
             "strike_zone_low": strike_zone["zone_low"],
             "strike_zone_start_idx": strike_zone["zone_start_idx"],
+            "zone_too_tight": risk_reward["zone_too_tight"],
             "risk": risk_reward["risk"],
             "reward": risk_reward["reward"],
             "rr_ratio": risk_reward["rr_ratio"],
