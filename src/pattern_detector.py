@@ -260,7 +260,7 @@ def detect_boundary_shift(
     max_slope_pct_per_bar=0.018,
     max_bars_to_reclaim=6,
     min_rr=1.05,
-    touch_tolerance_pct=0.015,
+    touch_tolerance_pct=0.03,
     min_touches=2,
     local_low_buffer=0.01,
 ):
@@ -272,6 +272,11 @@ def detect_boundary_shift(
 
     註：max_sweep_pct 預設 22%（原始規格建議 20%，但實測欣興(3037)
     的洗盤深度約 20.36%，卡在 20% 門檻外——改回 22% 較貼合實盤情況）。
+    touch_tolerance_pct/min_touches 原設 1.5%/2次過嚴（實測真實資料顯示這個
+    臨界值附近觸及次數是 0→2 跳躍式變化，不是漸進的），已校準為 3%/2次——
+    用欣興(3037)真實歷史資料驗證過可以正常觸發，且維持「至少2次觸及」的
+    原始規格精神。這組數字只驗證過一檔標的，建議之後累積更多真實案例再確認
+    是否需要微調。
     """
     total = len(df)
     if total < lookback_window + 8:
