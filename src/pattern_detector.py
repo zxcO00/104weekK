@@ -1,164 +1,323 @@
 """
 pattern_detector.py
-「邊界重塑 (Boundary Reset)」型態偵測邏輯 — 動態斜率邊界 + 滿足區回踩 + 緊縮箱型精算版。
+老余（余適安）裸K交易體系 —— 「邊界重塑」五階段狀態機。
 
-v2 更新（依實盤人工核對修正）：
-- 滿足區判斷（動態邊界±3.5%/1.5%）維持不變，這部分跟人工判讀吻合度高。
-- 進場/停損不再直接用「動態邊界」與「洗盤最深點」計算，改成優先尋找進場前
-  最近一段「緊縮盤整箱型」，用箱型高/低點精算進場與停損——更貼近實盤習慣的
-  「盤整區間突破」邏輯，停損也更貼近進場價（不是整段型態的最深洗盤點）。
-- 新增排除條件：如果這個緊縮箱型跟洗盤後的反彈高點（peak2）距離太近
-  （中間沒有拉開足夠的整理時間），視為「黏在一起」的劣質型態，直接排除。
-- 找不到符合條件的緊縮箱型時，退回舊版公式（動態邊界 / 洗盤低點）計算，
-  避免因為箱型判定過嚴而漏掉原本能抓到的訊號。
+核心心法：「先有大格局邊界，再找小細節，吃在邊界，守在外面」，
+結合 J. Welles Wilder 翻亞當（Second Reflection，1:1 等距鏡像對稱）。
+
+五個階段：
+  狀態1 Level Formation  大格局關鍵邊界確立 —— 找出至少 2 次以上測試過的支撐低點，
+                          容許邊界走平或微幅向上墊高。
+  狀態2 Liquidity Sweep  刺穿假跌破 —— 深 V 刺穿邊界，深度需在合理範圍。
+  狀態3 Reclaim          強勢收復確認（翻亞當條件成立）—— 收盤站回邊界之上，
+                          且不能在低檔盤整拖太久。
+  狀態4 Retest           滿足區回踩「摸邊界」—— 絕不追高突破，只在回踩時吃單。
+  狀態5 Risk/Reward      老余流風控與停利定錨 —— 進場/停損/停利定價 + 風報比濾網。
+
+回傳格式（重要變更）：
+  detect_boundary_shift() 永遠回傳一個 dict，不再回傳 None。
+  每個 dict 都帶 "status" 欄位，可能是以下常數之一：
+    STATUS_INSUFFICIENT_DATA / STATUS_NO_VALID_LEVEL / STATUS_WATCHING_SWEEP /
+    STATUS_WATCHING_RECLAIM / STATUS_WAITING_RETEST / STATUS_RR_REJECTED /
+    STATUS_TRIGGERED
+  只有 status == STATUS_TRIGGERED 時，dict 才會包含完整的下單四要素
+  （entry_price, stop_loss, tp_adam, boundary, box_top, box_bottom, rr_ratio 等），
+  這些 key 名稱與 visualizer.py / position_sizing.py 完全相容。
+  其餘狀態的 dict 只帶偵測到的中繼資訊，用來組成「潛在觀察名單」。
 """
 
 import numpy as np
 
+# ---- 狀態常數 ----
+STATUS_INSUFFICIENT_DATA = "STATUS_INSUFFICIENT_DATA"
+STATUS_NO_VALID_LEVEL = "STATUS_NO_VALID_LEVEL"
+STATUS_WATCHING_SWEEP = "STATUS_WATCHING_SWEEP"        # 邊界已成立，等待深洗盤出現
+STATUS_WATCHING_RECLAIM = "STATUS_WATCHING_RECLAIM"    # 洗盤已現，等待強勢收復站回邊界
+STATUS_WAITING_RETEST = "STATUS_WAITING_RETEST"        # 已收復，等待回踩滿足區
+STATUS_RR_REJECTED = "STATUS_RR_REJECTED"              # 已回踩滿足區，但風報比不足
+STATUS_TRIGGERED = "STATUS_TRIGGERED"                  # 五階段全部滿足，正式觸發進場
 
-def _find_tight_box(df, end_idx, min_bars=2, max_bars=6, max_range_pct=0.06):
+# 狀態的「進度排名」，數字越大代表越接近觸發，用來在多個候選洗盤點裡挑出
+# 目前最值得關注的那一個（回傳給主程式當觀察名單用）。
+_STATUS_RANK = {
+    STATUS_NO_VALID_LEVEL: 0,
+    STATUS_WATCHING_SWEEP: 1,
+    STATUS_WATCHING_RECLAIM: 2,
+    STATUS_WAITING_RETEST: 3,
+    STATUS_RR_REJECTED: 4,
+}
+
+
+# ==============================================================================
+# 狀態 1：大格局關鍵邊界確立（Level Formation）
+# ==============================================================================
+def _stage1_level_formation(df, s_idx, lookback_window, max_slope_pct_per_bar,
+                             touch_tolerance_pct=0.015, min_touches=2):
     """
-    從 end_idx（含）往前找一段「緊縮盤整箱型」——連續 N 根週K的高低波動幅度
-    都在 max_range_pct 以內。會嘗試從 min_bars 逐步放大到 max_bars，回傳能維持
-    在門檻內的最大範圍（箱型抓得越完整越好）。
-
-    回傳 (box_high, box_low, box_start_idx)；完全找不到符合條件的箱型則回傳 None。
+    回溯 s_idx 之前 lookback_window 根K棒，用線性回歸抓出動態邊界基準線。
+    要求：
+      - 邊界走平或微幅向上（斜率百分比落在 [-0.5%, max_slope_pct_per_bar]）。
+      - 至少有 min_touches 根K棒的低點貼近邊界（視為「測試過的支撐」）。
+    成立回傳 {slope, intercept, base_len, touches}，不成立回傳 None。
     """
-    best = None
-    for n in range(min_bars, max_bars + 1):
-        start = end_idx - n + 1
-        if start < 0:
-            break
-        window = df.iloc[start:end_idx + 1]
-        box_high = float(window["High"].max())
-        box_low = float(window["Low"].min())
-        if box_low <= 0:
-            continue
-        box_range_pct = (box_high - box_low) / box_low
-        if box_range_pct <= max_range_pct:
-            best = (box_high, box_low, start)
-        else:
-            # 視窗只會越放越寬，範圍只會越算越大，一旦超標就不用再往下試
-            break
-    return best
+    if s_idx - lookback_window < 0:
+        return None
+
+    base_df = df.iloc[s_idx - lookback_window: s_idx]
+    if len(base_df) < lookback_window:
+        return None
+
+    x_base = np.arange(len(base_df))
+    y_lows = base_df["Low"].values
+    slope, intercept = np.polyfit(x_base, y_lows, 1)
+
+    base_mean_price = float(np.mean(y_lows))
+    if base_mean_price <= 0:
+        return None
+
+    slope_pct = slope / base_mean_price
+    if not (-0.005 <= slope_pct <= max_slope_pct_per_bar):
+        return None
+
+    fitted = intercept + slope * x_base
+    touches = int(np.sum(np.abs(y_lows - fitted) / fitted <= touch_tolerance_pct))
+    if touches < min_touches:
+        return None
+
+    return {"slope": float(slope), "intercept": float(intercept),
+            "base_len": len(base_df), "touches": touches}
 
 
+def _boundary_at(level, position_from_base_start):
+    """依線性回歸結果，推算某個相對位置上的邊界價位"""
+    return float(level["intercept"] + level["slope"] * position_from_base_start)
+
+
+# ==============================================================================
+# 狀態 2：刺穿假跌破（Liquidity Sweep）
+# ==============================================================================
+def _stage2_sweep(df, s_idx, level, min_sweep_pct, max_sweep_pct):
+    """
+    檢查 s_idx 這根K棒是否構成有效的「刺穿假跌破」：
+    跌破當時邊界的深度需落在 [min_sweep_pct, max_sweep_pct] 之間
+    （太淺是雜訊，太深視為真跌破/倒莊，不是假跌破）。
+    """
+    boundary_at_sweep = _boundary_at(level, level["base_len"])
+    if boundary_at_sweep <= 0:
+        return None
+
+    sweep_low = float(df.loc[s_idx, "Low"])
+    sweep_pct = (boundary_at_sweep - sweep_low) / boundary_at_sweep
+    if not (min_sweep_pct <= sweep_pct <= max_sweep_pct):
+        return None
+
+    return {"boundary_at_sweep": boundary_at_sweep, "sweep_low": sweep_low, "sweep_pct": sweep_pct}
+
+
+# ==============================================================================
+# 狀態 3：強勢收復確認（Reclaim / 翻亞當條件成立）
+# ==============================================================================
+def _stage3_reclaim(df, s_idx, last_idx, sweep, max_bars_to_reclaim=6):
+    """
+    要求刺穿後數根K棒內，收盤價要明確站回邊界之上，且不能在低檔盤整拖太久
+    （超過 max_bars_to_reclaim 根都沒收復，視為破位確立、型態失敗）。
+    收復後記錄波段最高點 Peak，計算翻亞當高度 pattern_height = Peak - L_sweep。
+    """
+    post_sweep = df.iloc[s_idx + 1: last_idx]
+    if len(post_sweep) < 2:
+        return None
+
+    closes = post_sweep["Close"].values
+    reclaim_hits = np.where(closes > sweep["boundary_at_sweep"])[0]
+    if len(reclaim_hits) == 0:
+        return None
+
+    bars_to_reclaim = int(reclaim_hits[0]) + 1
+    if bars_to_reclaim > max_bars_to_reclaim:
+        return None  # 在低檔盤整拖太久，型態不成立
+
+    peak2_local_idx = int(np.argmax(post_sweep["High"].values))
+    peak2 = float(post_sweep["High"].iloc[peak2_local_idx])
+    peak2_idx = s_idx + 1 + peak2_local_idx
+
+    if peak2 < sweep["boundary_at_sweep"]:
+        return None
+
+    pattern_height = peak2 - sweep["sweep_low"]
+
+    return {"peak2": peak2, "peak2_idx": peak2_idx, "pattern_height": pattern_height,
+            "bars_to_reclaim": bars_to_reclaim}
+
+
+# ==============================================================================
+# 狀態 4：滿足區回踩「摸邊界」（Retest / 綠框吃單點）
+# ==============================================================================
+def _stage4_retest(df, last_idx, s_idx, level):
+    """
+    老余核心戒律：「絕不追高突破，只在回踩邊界時吃單」。
+    以「當前」動態邊界（外推到 last_idx）為基準，計算滿足區：
+      Box_top    = S_current * 1.035
+      Box_bottom = S_current * 0.985
+    最新一根K棒必須同時滿足：最低價踩進滿足區、收盤守穩滿足區下緣。
+    """
+    position_from_base_start = last_idx - (s_idx - level["base_len"])
+    boundary_at_current = _boundary_at(level, position_from_base_start)
+
+    box_top = boundary_at_current * 1.035
+    box_bottom = boundary_at_current * 0.985
+
+    curr_low = float(df.loc[last_idx, "Low"])
+    curr_close = float(df.loc[last_idx, "Close"])
+
+    if not (curr_low <= box_top and curr_close >= box_bottom):
+        return None
+
+    return {
+        "boundary_at_current": boundary_at_current,
+        "box_top": box_top, "box_bottom": box_bottom,
+        "curr_low": curr_low, "curr_close": curr_close,
+    }
+
+
+# ==============================================================================
+# 狀態 5：老余流風控與停利定錨（Risk / Reward）
+# ==============================================================================
+def _stage5_risk_reward(sweep, reclaim, retest, min_rr):
+    """
+    Entry = max(S_current, L_current)
+    SL    = L_sweep * 0.992（破底翻最低點外側微幅緩衝）
+    TP    = Entry + pattern_height（1:1 翻亞當對稱滿足）
+    風報比濾網：RR >= min_rr
+    """
+    entry_price = max(retest["boundary_at_current"], retest["curr_low"])
+    stop_loss = sweep["sweep_low"] * 0.992
+    tp_adam = entry_price + reclaim["pattern_height"]
+
+    risk = entry_price - stop_loss
+    reward = tp_adam - entry_price
+    rr_ratio = reward / risk if risk > 0 else 0.0
+
+    if rr_ratio < min_rr:
+        return None, rr_ratio
+
+    return {
+        "entry_price": float(entry_price),
+        "stop_loss": float(stop_loss),
+        "tp_adam": float(tp_adam),
+        "risk": float(risk),
+        "reward": float(reward),
+        "rr_ratio": float(rr_ratio),
+    }, rr_ratio
+
+
+# ==============================================================================
+# 主流程：五階段狀態機
+# ==============================================================================
 def detect_boundary_shift(
     df,
     lookback_window=12,
     max_bars_since_sweep=12,
     min_sweep_pct=0.015,
-    max_sweep_pct=0.22,
+    max_sweep_pct=0.20,
     max_slope_pct_per_bar=0.018,
+    max_bars_to_reclaim=6,
     min_rr=1.05,
-    box_min_bars=2,
-    box_max_bars=6,
-    box_max_range_pct=0.06,
-    box_stop_buffer=0.005,
-    min_box_gap_bars=2,
+    touch_tolerance_pct=0.015,
+    min_touches=2,
 ):
     """
-    以線性回歸抓出微正斜率通道的動態邊界，判斷最新一根週K棒是否回踩「滿足區」；
-    符合條件後，優先用「進場前的緊縮盤整箱型」精算進場/停損，找不到箱型才退回
-    舊版公式。符合條件回傳下單四要素 dict，否則回傳 None。
-
-    新增排除條件：緊縮箱型如果跟洗盤後反彈高點（peak2）距離小於 min_box_gap_bars，
-    視為型態「黏在一起」，直接排除這個候選（不會退回舊公式，直接判定不合格）。
+    永遠回傳一個 dict（不再回傳 None）。
+    status == STATUS_TRIGGERED 時，dict 帶完整下單四要素；
+    其餘狀態的 dict 帶目前偵測到、最值得關注的中繼資訊，可用來組觀察名單。
     """
     total = len(df)
     if total < lookback_window + 8:
-        return None
+        return {"status": STATUS_INSUFFICIENT_DATA}
 
     last_idx = total - 1
-    curr_low = float(df.loc[last_idx, "Low"])
-    curr_close = float(df.loc[last_idx, "Close"])
 
-    for s_idx in range(last_idx - 2, max(last_idx - max_bars_since_sweep, lookback_window), -1):
-        base_df = df.iloc[s_idx - lookback_window: s_idx]
-        sweep_low = float(df.loc[s_idx, "Low"])
+    best_status = STATUS_NO_VALID_LEVEL
+    best_rank = -1
+    best_context = {}
 
-        x_base = np.arange(len(base_df))
-        y_lows = base_df["Low"].values
-        slope, intercept = np.polyfit(x_base, y_lows, 1)
+    def _update_best(status, context):
+        nonlocal best_status, best_rank, best_context
+        rank = _STATUS_RANK.get(status, -1)
+        if rank > best_rank:
+            best_rank = rank
+            best_status = status
+            best_context = context
 
-        base_mean_price = float(np.mean(y_lows))
-        slope_pct = slope / base_mean_price
+    scan_from = max(last_idx - max_bars_since_sweep, lookback_window)
 
-        if not (-0.005 <= slope_pct <= max_slope_pct_per_bar):
-            continue
-
-        boundary_at_sweep = float(intercept + slope * len(base_df))
-        boundary_at_current = float(intercept + slope * (last_idx - (s_idx - lookback_window)))
-
-        sweep_depth = boundary_at_sweep - sweep_low
-        sweep_pct = sweep_depth / boundary_at_sweep
-        if not (min_sweep_pct <= sweep_pct <= max_sweep_pct):
-            continue
-
-        post_sweep = df.iloc[s_idx + 1: last_idx]
-        if len(post_sweep) < 2:
-            continue
-
-        peak2_local_idx = int(np.argmax(post_sweep["High"].values))
-        peak2 = float(post_sweep["High"].iloc[peak2_local_idx])
-        peak2_idx = s_idx + 1 + peak2_local_idx
-
-        if peak2 < boundary_at_sweep:
-            continue
-
-        box_top = boundary_at_current * 1.035
-        box_bottom = boundary_at_current * 0.985
-
-        if not (curr_low <= box_top and curr_close >= box_bottom):
-            continue
-
-        # ---- 進場/停損精算：優先用緊縮盤整箱型，找不到才退回舊公式 ----
-        tight_box = _find_tight_box(
-            df, last_idx, min_bars=box_min_bars, max_bars=box_max_bars, max_range_pct=box_max_range_pct
+    for s_idx in range(last_idx - 2, scan_from, -1):
+        # ---- 狀態 1：大格局邊界確立 ----
+        level = _stage1_level_formation(
+            df, s_idx, lookback_window, max_slope_pct_per_bar, touch_tolerance_pct, min_touches
         )
+        if level is None:
+            continue  # 這個候選點連邊界都立不住，看下一個候選
 
-        entry_mode = "fallback"
-        if tight_box:
-            box_high, box_low, box_start_idx = tight_box
-            gap_bars = box_start_idx - peak2_idx
-
-            if gap_bars < min_box_gap_bars:
-                # 箱型跟洗盤後反彈高點黏得太近 —— 劣質型態，直接排除這個候選
-                continue
-
-            entry_price = box_high
-            stop_loss = box_low * (1 - box_stop_buffer)
-            entry_mode = "tight_box"
-        else:
-            entry_price = float(max(boundary_at_current, curr_low))
-            stop_loss = float(sweep_low * 0.992)
-
-        pattern_height = peak2 - sweep_low
-        tp_adam = float(entry_price + pattern_height)
-
-        risk = entry_price - stop_loss
-        reward = tp_adam - entry_price
-        rr_ratio = reward / risk if risk > 0 else 0
-
-        if rr_ratio < min_rr:
+        # ---- 狀態 2：刺穿假跌破 ----
+        sweep = _stage2_sweep(df, s_idx, level, min_sweep_pct, max_sweep_pct)
+        if sweep is None:
+            _update_best(STATUS_WATCHING_SWEEP, {
+                "sweep_idx": s_idx,
+                "boundary": _boundary_at(level, level["base_len"]),
+            })
             continue
 
+        # ---- 狀態 3：強勢收復確認（翻亞當條件成立）----
+        reclaim = _stage3_reclaim(df, s_idx, last_idx, sweep, max_bars_to_reclaim)
+        if reclaim is None:
+            _update_best(STATUS_WATCHING_RECLAIM, {
+                "sweep_idx": s_idx,
+                "sweep_low": sweep["sweep_low"],
+                "boundary_at_sweep": sweep["boundary_at_sweep"],
+            })
+            continue
+
+        # ---- 狀態 4：滿足區回踩 ----
+        retest = _stage4_retest(df, last_idx, s_idx, level)
+        if retest is None:
+            _update_best(STATUS_WAITING_RETEST, {
+                "sweep_idx": s_idx,
+                "peak2": reclaim["peak2"],
+                "sweep_low": sweep["sweep_low"],
+                "pattern_height": reclaim["pattern_height"],
+            })
+            continue
+
+        # ---- 狀態 5：風控與停利定錨 ----
+        risk_reward, rr_ratio = _stage5_risk_reward(sweep, reclaim, retest, min_rr)
+        if risk_reward is None:
+            _update_best(STATUS_RR_REJECTED, {
+                "sweep_idx": s_idx,
+                "boundary": retest["boundary_at_current"],
+                "box_top": retest["box_top"],
+                "box_bottom": retest["box_bottom"],
+                "rr_ratio": rr_ratio,
+            })
+            continue
+
+        # ---- 五階段全部通過：正式觸發進場 ----
         return {
-            "boundary": boundary_at_current,
-            "boundary_slope": slope,
-            "sweep_low": sweep_low,
-            "peak2": peak2,
-            "entry_price": entry_price,
-            "stop_loss": stop_loss,
-            "tp_adam": tp_adam,
-            "box_top": box_top,
-            "box_bottom": box_bottom,
-            "risk": risk,
-            "reward": reward,
-            "rr_ratio": rr_ratio,
+            "status": STATUS_TRIGGERED,
+            "boundary": retest["boundary_at_current"],
+            "boundary_slope": level["slope"],
+            "sweep_low": sweep["sweep_low"],
+            "peak2": reclaim["peak2"],
+            "entry_price": risk_reward["entry_price"],
+            "stop_loss": risk_reward["stop_loss"],
+            "tp_adam": risk_reward["tp_adam"],
+            "box_top": retest["box_top"],
+            "box_bottom": retest["box_bottom"],
+            "risk": risk_reward["risk"],
+            "reward": risk_reward["reward"],
+            "rr_ratio": risk_reward["rr_ratio"],
             "date": str(df.loc[last_idx, "DateStr"]),
             "sweep_idx": s_idx,
-            "entry_mode": entry_mode,
         }
 
-    return None
+    # 沒有任何候選點走完五階段，回傳目前停留的最遠狀態（供觀察名單使用）
+    return {"status": best_status, **best_context}

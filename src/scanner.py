@@ -1,9 +1,14 @@
 """
 scanner.py
-主流程編排：下載資料 -> 偵測型態 -> 部位試算 -> 繪圖 -> 推播 -> 輸出報告（詳細表 + 精簡清單）。
+主流程編排：下載資料 -> 五階段狀態機偵測 -> 部位試算 -> 繪圖 -> 推播 -> 輸出報告
+（觸發清單 + 潛在觀察名單）。
 
 設計原則：繪圖/推播失敗絕不能讓已偵測到的訊號消失——訊號偵測與呈現分離，
 即使圖表產生失敗，也要保留訊號紀錄並改用純文字通知。
+
+重要變更：pattern_detector.detect_boundary_shift() 現在永遠回傳一個 dict
+（帶 status 欄位），不再回傳 None。只有 status == STATUS_TRIGGERED 才有完整
+下單四要素；其餘狀態視為「潛在觀察名單」，另外整理成報告的第二個區塊。
 """
 
 import os
@@ -11,7 +16,10 @@ import datetime
 import traceback
 
 from data_fetcher import fetch_all_watchlist, is_us_ticker, WATCHLIST_MAPPING
-from pattern_detector import detect_boundary_shift
+from pattern_detector import (
+    detect_boundary_shift,
+    STATUS_TRIGGERED, STATUS_WATCHING_RECLAIM, STATUS_WAITING_RETEST, STATUS_RR_REJECTED,
+)
 from historical_satisfaction import historical_satisfaction_score
 from visualizer import plot_and_save
 from position_sizing import calc_position_size
@@ -28,6 +36,15 @@ BATCH_SIZE = int(os.environ.get("YF_BATCH_SIZE", 15))
 # 等回測驗證過合理門檻後，再調高這個環境變數即可啟用真正的過濾。
 MIN_HISTORICAL_SATISFACTIONS = int(os.environ.get("MIN_HISTORICAL_SATISFACTIONS", 0))
 
+# 哪些「未觸發」狀態值得列進潛在觀察名單（排除掉太早期、資訊量不足的狀態）
+_WATCHLIST_STATUSES = {STATUS_WATCHING_RECLAIM, STATUS_WAITING_RETEST, STATUS_RR_REJECTED}
+
+_STATUS_LABELS = {
+    STATUS_WATCHING_RECLAIM: "等待強勢收復站回邊界",
+    STATUS_WAITING_RETEST: "已收復，等待回踩滿足區",
+    STATUS_RR_REJECTED: "已回踩滿足區，但風報比不足",
+}
+
 
 def run_scan():
     print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 啟動觀察池自動監控掃描...")
@@ -39,9 +56,10 @@ def run_scan():
     send_data_warning(len(stock_data), len(WATCHLIST_MAPPING))
 
     triggers = []
+    watchlist = []
     plot_failures = 0
 
-    print("\n>> 正在檢驗各標的最新週K棒是否符合邊界重塑回踩條件...")
+    print("\n>> 正在以五階段狀態機檢驗各標的最新週K棒...")
     for ticker, (name, df) in stock_data.items():
         # 第一階段：偵測型態（絕對不能被繪圖/推播的例外影響）
         try:
@@ -50,7 +68,12 @@ def run_scan():
             print(f"⚠️ 偵測 {ticker} 時發生錯誤，略過: {e}")
             continue
 
-        if not res:
+        status = res.get("status")
+
+        if status in _WATCHLIST_STATUSES:
+            watchlist.append({"ticker": ticker, "name": name, "status": status, "res": res})
+
+        if status != STATUS_TRIGGERED:
             continue
 
         # 歷史滿足紀錄前置濾網（信任分數，非即時訊號本身）
@@ -85,8 +108,6 @@ def run_scan():
                 f"（交割款: {pos['currency']} {pos['settlement_estimate']:,.0f}"
                 f" | 風險: {pos['currency']} {pos['actual_risk']:,.0f}）"
             )
-        mode_label = "緊縮箱型精算" if res.get("entry_mode") == "tight_box" else "退回舊公式"
-        print(f">> 進場模式: {mode_label}")
         rate_str = f"{hist['satisfaction_rate']*100:.0f}%" if hist["satisfaction_rate"] is not None else "無歷史樣本"
         print(f">> 歷史翻亞當滿足紀錄: {hist['satisfied_count']}/{hist['total_patterns']}（滿足率 {rate_str}）")
         print("=" * 65)
@@ -116,47 +137,56 @@ def run_scan():
     if plot_failures:
         print(f"\n⚠️ 共有 {plot_failures} 檔標的繪圖失敗（可能是中文字型下載問題），但訊號已保留在報告中。")
 
-    print(f"\n🏁 掃描完成！全市場共有 {len(triggers)} 檔標的符合進場條件。\n")
-    write_report(triggers)
-    return triggers
+    print(f"\n🏁 掃描完成！全市場共有 {len(triggers)} 檔標的正式觸發，{len(watchlist)} 檔進入潛在觀察名單。\n")
+    write_report(triggers, watchlist)
+    return triggers, watchlist
 
 
-def write_report(triggers, path="scan_summary.md"):
+def write_report(triggers, watchlist=None, path="scan_summary.md"):
+    watchlist = watchlist or []
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"## 觀察池邊界重塑掃描報告（{datetime.date.today()}）\n\n")
 
         if not triggers:
-            f.write("本週全市場（台股0050＋中型100＋美股大型科技）無符合條件標的，持續監控待命。\n")
-            return
+            f.write("本週全市場（台股0050＋中型100＋美股大型科技）無正式觸發標的。\n\n")
+        else:
+            sorted_triggers = sorted(triggers, key=lambda t: t["res"]["rr_ratio"], reverse=True)
 
-        sorted_triggers = sorted(triggers, key=lambda t: t["res"]["rr_ratio"], reverse=True)
+            f.write("### 正式觸發清單\n\n")
+            f.write("| 標的 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 歷史滿足 | 圖表 |\n")
+            f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+            for t in sorted_triggers:
+                name, res, pos = t["name"], t["res"], t["pos"]
+                chart_note = "✅" if t["img_path"] else "⚠️失敗"
+                hist = t.get("hist") or {"satisfied_count": 0, "total_patterns": 0}
+                hist_note = f"{hist['satisfied_count']}/{hist['total_patterns']}"
+                if pos:
+                    f.write(
+                        f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
+                        f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | "
+                        f"{pos['unit_display']} | {pos['currency']} {pos['settlement_estimate']:,.0f} | "
+                        f"{hist_note} | {chart_note} |\n"
+                    )
+                else:
+                    f.write(
+                        f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
+                        f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | - | - | "
+                        f"{hist_note} | {chart_note} |\n"
+                    )
 
-        f.write("### 詳細清單\n\n")
-        f.write("| 標的 | 進場模式 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 歷史滿足 | 圖表 |\n")
-        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
-        for t in sorted_triggers:
-            name, res, pos = t["name"], t["res"], t["pos"]
-            chart_note = "✅" if t["img_path"] else "⚠️失敗"
-            mode_note = "箱型精算" if res.get("entry_mode") == "tight_box" else "舊公式"
-            hist = t.get("hist") or {"satisfied_count": 0, "total_patterns": 0}
-            hist_note = f"{hist['satisfied_count']}/{hist['total_patterns']}"
-            if pos:
-                f.write(
-                    f"| {name} | {mode_note} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
-                    f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | "
-                    f"{pos['unit_display']} | {pos['currency']} {pos['settlement_estimate']:,.0f} | "
-                    f"{hist_note} | {chart_note} |\n"
-                )
-            else:
-                f.write(
-                    f"| {name} | {mode_note} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
-                    f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | - | - | "
-                    f"{hist_note} | {chart_note} |\n"
-                )
+            f.write("\n### 適合入場精簡清單\n\n")
+            for idx, t in enumerate(sorted_triggers, start=1):
+                f.write(f"{idx}. {t['name']}\n")
 
-        f.write("\n### 適合入場精簡清單\n\n")
-        for idx, t in enumerate(sorted_triggers, start=1):
-            f.write(f"{idx}. {t['name']}\n")
+        f.write("\n### 潛在觀察名單（尚未觸發，但已進入型態關鍵階段）\n\n")
+        if not watchlist:
+            f.write("本週無標的進入觀察階段。\n")
+        else:
+            f.write("| 標的 | 目前階段 |\n")
+            f.write("| :--- | :--- |\n")
+            for w in watchlist:
+                label = _STATUS_LABELS.get(w["status"], w["status"])
+                f.write(f"| {w['name']} | {label} |\n")
 
 
 def main():
