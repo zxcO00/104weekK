@@ -23,6 +23,7 @@ from data_fetcher import (  # noqa: E402
     fetch_all_watchlist, WATCHLIST_MAPPING, download_with_retry, prepare_dataframe,
 )
 from pattern_detector import detect_boundary_shift  # noqa: E402
+from historical_satisfaction import historical_satisfaction_score  # noqa: E402
 from position_sizing import calc_position_size  # noqa: E402
 from visualizer import plot_and_save  # noqa: E402
 
@@ -64,7 +65,11 @@ with tab_scan:
             if res:
                 pos = calc_position_size(ticker, res["entry_price"], res["stop_loss"],
                                           risk_amount_twd=risk_amount, usd_twd_rate=usd_rate)
-                results.append({"ticker": ticker, "name": name, "df": df, "res": res, "pos": pos})
+                try:
+                    hist = historical_satisfaction_score(df)
+                except Exception:
+                    hist = {"total_patterns": 0, "satisfied_count": 0, "satisfaction_rate": None}
+                results.append({"ticker": ticker, "name": name, "df": df, "res": res, "pos": pos, "hist": hist})
             progress.progress((i + 1) / max(loaded, 1))
         progress.empty()
 
@@ -91,6 +96,7 @@ with tab_scan:
                 "R/R": round(r["res"]["rr_ratio"], 2),
                 "建議部位": r["pos"]["unit_display"] if r["pos"] else "-",
                 "交割款估計": f"{r['pos']['currency']} {r['pos']['settlement_estimate']:,.0f}" if r["pos"] else "-",
+                "歷史滿足": f"{r['hist']['satisfied_count']}/{r['hist']['total_patterns']}",
             }
             for r in sorted_results
         ]
@@ -151,6 +157,13 @@ with tab_single:
                     st.metric("風報比 R/R", f"{res['rr_ratio']:.2f}")
                     mode_note = "🎯 緊縮箱型精算" if res.get("entry_mode") == "tight_box" else "📐 退回舊公式"
                     st.caption(f"進場模式：{mode_note}")
+
+                    try:
+                        hist = historical_satisfaction_score(df)
+                        rate_str = f"{hist['satisfaction_rate']*100:.0f}%" if hist["satisfaction_rate"] is not None else "無歷史樣本"
+                        st.caption(f"📊 歷史翻亞當滿足紀錄：{hist['satisfied_count']}/{hist['total_patterns']}（滿足率 {rate_str}）")
+                    except Exception:
+                        pass
 
                     if pos:
                         st.write(f"💰 建議部位：**{pos['unit_display']}**（交割款估計 {pos['currency']} {pos['settlement_estimate']:,.0f}）")

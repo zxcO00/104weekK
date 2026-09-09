@@ -31,7 +31,8 @@ Telegram / Discord。
 └── src/
     ├── scanner.py           # 主流程：下載 -> 偵測 -> 部位試算 -> 繪圖 -> 推播 -> 產出報告
     ├── data_fetcher.py       # yfinance 批次下載、清洗、分批重試（含 WATCHLIST_MAPPING）
-    ├── pattern_detector.py   # detect_boundary_shift()：動態斜率邊界 + 滿足區回踩判定
+    ├── pattern_detector.py   # detect_boundary_shift()：動態斜率邊界 + 滿足區回踩 + 緊縮箱型進場/停損精算
+    ├── historical_satisfaction.py  # 「翻亞當」歷史滿足紀錄前置濾網（信任分數，非即時訊號）
     ├── visualizer.py         # plot_and_save()：中文字型註冊 + 滿足區框 + 四橫線圖
     ├── position_sizing.py    # calc_position_size()：依台股/美股自動切換幣別與成本模型
     └── notifier.py           # Telegram / Discord webhook 推播 + 失敗告警
@@ -46,6 +47,7 @@ Telegram / Discord。
 | `DISCORD_WEBHOOK_URL` | Discord Webhook URL | 選填 |
 | `POSITION_RISK_AMOUNT_TWD` | 單筆固定風險金額（新台幣，美股會依匯率換算） | 選填，預設 10000 |
 | `USD_TWD_RATE` | 美元兌台幣參考匯率 | 選填，預設 32.0 |
+| `MIN_HISTORICAL_SATISFACTIONS` | 歷史翻亞當滿足次數門檻（低於此門檻的訊號會被過濾掉） | 選填，預設 0（不過濾，只附加統計資訊） |
 
 ## Streamlit 網頁版（app.py）
 
