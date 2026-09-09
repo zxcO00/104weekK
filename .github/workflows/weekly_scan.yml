@@ -35,6 +35,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           POSITION_RISK_AMOUNT_TWD: "10000"
           USD_TWD_RATE: "32.0"
+          MIN_HISTORICAL_SATISFACTIONS: "0"
         run: python scanner.py
 
       - name: Upload scan results as artifact
