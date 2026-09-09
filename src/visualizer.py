@@ -125,14 +125,28 @@ def plot_and_save(df, ticker, name, res, output_dir="output"):
     ax1.bar(x_indices[down], df.loc[down, "Open"] - df.loc[down, "Close"], width,
             bottom=df.loc[down, "Close"], color="#00F5FF", edgecolor="#00F5FF")
 
-    # 滿足區（綠框）
+    # 打擊區（黃框）—— 包覆最新回踩K棒的實際密集重疊區，而非固定百分比帶
     last_x = len(df) - 1
-    box_w = 1.2
-    box_h = res["box_top"] - res["box_bottom"]
+    if "strike_zone_start_idx" in res and "strike_zone_high" in res and "strike_zone_low" in res:
+        zone_start_x = res["strike_zone_start_idx"]
+        zone_end_x = last_x
+        box_x = zone_start_x - 0.4
+        box_w = (zone_end_x - zone_start_x) + 0.8
+        box_bottom = res["strike_zone_low"]
+        box_h = res["strike_zone_high"] - res["strike_zone_low"]
+        zone_label = "打擊區"
+    else:
+        # 舊版相容：沒有打擊區資料時，退回滿足區（動態邊界±緩衝）畫法
+        box_x = last_x - 0.6
+        box_w = 1.2
+        box_bottom = res["box_bottom"]
+        box_h = res["box_top"] - res["box_bottom"]
+        zone_label = "滿足區"
+
     rect = patches.Rectangle(
-        (last_x - 0.6, res["box_bottom"]), box_w, box_h,
-        linewidth=2, edgecolor="#00FF7F", facecolor="#00FF7F", alpha=0.18,
-        label="滿足區",
+        (box_x, box_bottom), box_w, max(box_h, 1e-6),
+        linewidth=2, edgecolor="#FFD700", facecolor="#FFD700", alpha=0.18,
+        label=zone_label,
     )
     ax1.add_patch(rect)
 

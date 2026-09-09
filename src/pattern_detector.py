@@ -24,6 +24,15 @@ pattern_detector.py
   （entry_price, stop_loss, tp_adam, boundary, box_top, box_bottom, rr_ratio 等），
   這些 key 名稱與 visualizer.py / position_sizing.py 完全相容。
   其餘狀態的 dict 只帶偵測到的中繼資訊，用來組成「潛在觀察名單」。
+
+v3 更新（依合作夥伴實盤圖表核對修正，以欣興3037為例）：
+  - 狀態5停損不再用「狀態2深洗盤最低點」計算，改用「收復邊界後、回踩打擊區
+    這段期間的實際局部低點」（strike_zone_low）外側緩衝（預設1%）——貼合實盤
+    「吃單守在打擊區外側」的用法，大幅縮減停損距離、拉高風報比。
+  - 翻亞當高度（pattern_height）計算基準維持用深洗盤低點不變，這部分經
+    合作夥伴確認已經很準確（如欣興週線滿足算出1413，跟手繪1500很接近）。
+  - 新增 strike_zone_high / strike_zone_low / strike_zone_start_idx 欄位，
+    供 visualizer.py 畫出真正包覆回踩K棒密集區的黃框，而非固定百分比帶。
 """
 
 import numpy as np
@@ -179,18 +188,40 @@ def _stage4_retest(df, last_idx, s_idx, level):
     }
 
 
+def _find_strike_zone(df, retest_start_idx, last_idx):
+    """
+    打擊區（吃單區間）的實際局部低/高點 —— 從收復邊界後的反彈高點（peak2）算起，
+    到目前這根K棒為止，這段「回檔到密集支撐帶」期間的真實低點與高點。
+
+    這是狀態5停損的基準：用這段回踩期間的局部低點，而不是狀態2那個整段型態
+    最深的洗盤低點（sweep_low）——後者拿來當停損太遠，會不合理地拉大風險。
+    """
+    zone_slice = df.iloc[retest_start_idx: last_idx + 1]
+    if len(zone_slice) == 0:
+        # 邊界情況（peak2 剛好就是上一根K棒）：退回只看當前這根K棒
+        curr_low = float(df.loc[last_idx, "Low"])
+        curr_high = float(df.loc[last_idx, "High"])
+        return {"zone_low": curr_low, "zone_high": curr_high, "zone_start_idx": last_idx}
+
+    zone_low = float(zone_slice["Low"].min())
+    zone_high = float(zone_slice["High"].max())
+    return {"zone_low": zone_low, "zone_high": zone_high, "zone_start_idx": retest_start_idx}
+
+
 # ==============================================================================
 # 狀態 5：老余流風控與停利定錨（Risk / Reward）
 # ==============================================================================
-def _stage5_risk_reward(sweep, reclaim, retest, min_rr):
+def _stage5_risk_reward(sweep, reclaim, retest, strike_zone, min_rr, local_low_buffer=0.01):
     """
     Entry = max(S_current, L_current)
-    SL    = L_sweep * 0.992（破底翻最低點外側微幅緩衝）
-    TP    = Entry + pattern_height（1:1 翻亞當對稱滿足）
+    SL    = 打擊區局部低點（strike_zone.zone_low）外側緩衝（預設 1%）
+            —— 不再用狀態2的深洗盤低點，改用「這次回踩打擊區時」的實際低點，
+            大幅縮減停損距離、拉高風報比，貼合實盤「吃單守在區間外側」的用法。
+    TP    = Entry + pattern_height（1:1 翻亞當對稱滿足，維持用 sweep_low 算高度不變）
     風報比濾網：RR >= min_rr
     """
     entry_price = max(retest["boundary_at_current"], retest["curr_low"])
-    stop_loss = sweep["sweep_low"] * 0.992
+    stop_loss = strike_zone["zone_low"] * (1 - local_low_buffer)
     tp_adam = entry_price + reclaim["pattern_height"]
 
     risk = entry_price - stop_loss
@@ -224,6 +255,7 @@ def detect_boundary_shift(
     min_rr=1.05,
     touch_tolerance_pct=0.015,
     min_touches=2,
+    local_low_buffer=0.01,
 ):
     """
     永遠回傳一個 dict（不再回傳 None）。
@@ -289,7 +321,8 @@ def detect_boundary_shift(
             continue
 
         # ---- 狀態 5：風控與停利定錨 ----
-        risk_reward, rr_ratio = _stage5_risk_reward(sweep, reclaim, retest, min_rr)
+        strike_zone = _find_strike_zone(df, reclaim["peak2_idx"] + 1, last_idx)
+        risk_reward, rr_ratio = _stage5_risk_reward(sweep, reclaim, retest, strike_zone, min_rr, local_low_buffer)
         if risk_reward is None:
             _update_best(STATUS_RR_REJECTED, {
                 "sweep_idx": s_idx,
@@ -307,11 +340,15 @@ def detect_boundary_shift(
             "boundary_slope": level["slope"],
             "sweep_low": sweep["sweep_low"],
             "peak2": reclaim["peak2"],
+            "peak2_idx": reclaim["peak2_idx"],
             "entry_price": risk_reward["entry_price"],
             "stop_loss": risk_reward["stop_loss"],
             "tp_adam": risk_reward["tp_adam"],
             "box_top": retest["box_top"],
             "box_bottom": retest["box_bottom"],
+            "strike_zone_high": strike_zone["zone_high"],
+            "strike_zone_low": strike_zone["zone_low"],
+            "strike_zone_start_idx": strike_zone["zone_start_idx"],
             "risk": risk_reward["risk"],
             "reward": risk_reward["reward"],
             "rr_ratio": risk_reward["rr_ratio"],
