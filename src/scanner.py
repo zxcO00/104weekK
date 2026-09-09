@@ -12,6 +12,7 @@ import traceback
 
 from data_fetcher import fetch_all_watchlist, is_us_ticker, WATCHLIST_MAPPING
 from pattern_detector import detect_boundary_shift
+from historical_satisfaction import historical_satisfaction_score
 from visualizer import plot_and_save
 from position_sizing import calc_position_size
 from notifier import (
@@ -22,6 +23,10 @@ from notifier import (
 DATA_PERIOD = os.environ.get("DATA_PERIOD", "2y")
 DATA_INTERVAL = os.environ.get("DATA_INTERVAL", "1wk")
 BATCH_SIZE = int(os.environ.get("YF_BATCH_SIZE", 15))
+
+# 歷史滿足紀錄前置濾網門檻：預設 0 代表不濾掉任何訊號，只是把統計資料附加到報告裡。
+# 等回測驗證過合理門檻後，再調高這個環境變數即可啟用真正的過濾。
+MIN_HISTORICAL_SATISFACTIONS = int(os.environ.get("MIN_HISTORICAL_SATISFACTIONS", 0))
 
 
 def run_scan():
@@ -48,13 +53,24 @@ def run_scan():
         if not res:
             continue
 
+        # 歷史滿足紀錄前置濾網（信任分數，非即時訊號本身）
+        try:
+            hist = historical_satisfaction_score(df)
+        except Exception as e:
+            print(f"⚠️ {ticker} 歷史滿足統計失敗，視為無資料: {e}")
+            hist = {"total_patterns": 0, "satisfied_count": 0, "satisfaction_rate": None}
+
+        if hist["satisfied_count"] < MIN_HISTORICAL_SATISFACTIONS:
+            print(f"⏭️ {ticker}（{name}）歷史滿足次數 {hist['satisfied_count']} 低於門檻 {MIN_HISTORICAL_SATISFACTIONS}，略過")
+            continue
+
         is_us = is_us_ticker(ticker)
         pos = calc_position_size(ticker, res["entry_price"], res["stop_loss"])
 
         # 一旦偵測到訊號，先記錄下來 —— 就算後面繪圖/推播失敗，這筆也不會消失
         trigger = {
             "ticker": ticker, "name": name, "res": res, "pos": pos,
-            "is_us": is_us, "img_path": None,
+            "is_us": is_us, "img_path": None, "hist": hist,
         }
         triggers.append(trigger)
 
@@ -71,6 +87,8 @@ def run_scan():
             )
         mode_label = "緊縮箱型精算" if res.get("entry_mode") == "tight_box" else "退回舊公式"
         print(f">> 進場模式: {mode_label}")
+        rate_str = f"{hist['satisfaction_rate']*100:.0f}%" if hist["satisfaction_rate"] is not None else "無歷史樣本"
+        print(f">> 歷史翻亞當滿足紀錄: {hist['satisfied_count']}/{hist['total_patterns']}（滿足率 {rate_str}）")
         print("=" * 65)
 
         # 第二階段：繪圖（失敗不影響訊號本身，改推純文字通知）
@@ -114,22 +132,26 @@ def write_report(triggers, path="scan_summary.md"):
         sorted_triggers = sorted(triggers, key=lambda t: t["res"]["rr_ratio"], reverse=True)
 
         f.write("### 詳細清單\n\n")
-        f.write("| 標的 | 進場模式 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 圖表 |\n")
-        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+        f.write("| 標的 | 進場模式 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 歷史滿足 | 圖表 |\n")
+        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
         for t in sorted_triggers:
             name, res, pos = t["name"], t["res"], t["pos"]
             chart_note = "✅" if t["img_path"] else "⚠️失敗"
             mode_note = "箱型精算" if res.get("entry_mode") == "tight_box" else "舊公式"
+            hist = t.get("hist") or {"satisfied_count": 0, "total_patterns": 0}
+            hist_note = f"{hist['satisfied_count']}/{hist['total_patterns']}"
             if pos:
                 f.write(
                     f"| {name} | {mode_note} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
                     f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | "
-                    f"{pos['unit_display']} | {pos['currency']} {pos['settlement_estimate']:,.0f} | {chart_note} |\n"
+                    f"{pos['unit_display']} | {pos['currency']} {pos['settlement_estimate']:,.0f} | "
+                    f"{hist_note} | {chart_note} |\n"
                 )
             else:
                 f.write(
                     f"| {name} | {mode_note} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
-                    f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | - | - | {chart_note} |\n"
+                    f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | - | - | "
+                    f"{hist_note} | {chart_note} |\n"
                 )
 
         f.write("\n### 適合入場精簡清單\n\n")
