@@ -121,6 +121,7 @@ with tab_scan:
                     "建議部位": r["pos"]["unit_display"] if r["pos"] else "-",
                     "交割款估計": f"{r['pos']['currency']} {r['pos']['settlement_estimate']:,.0f}" if r["pos"] else "-",
                     "歷史滿足": f"{r['hist']['satisfied_count']}/{r['hist']['total_patterns']}",
+                    "打擊區": "⚠️過窄" if r["res"].get("zone_too_tight") else "✅",
                 }
                 for r in sorted_results
             ]
@@ -190,6 +191,8 @@ with tab_single:
                     c3.metric("停損", f"{res['stop_loss']:.2f}")
                     c4.metric("停利", f"{res['tp_adam']:.2f}")
                     st.metric("風報比 R/R", f"{res['rr_ratio']:.2f}")
+                    if res.get("zone_too_tight"):
+                        st.warning("⚠️ 打擊區過窄（反彈高點才發生沒幾根K棒，回檔尚未止穩），停損已套用風險下限（2%），非打擊區實際低點")
 
                     try:
                         hist = historical_satisfaction_score(df)
