@@ -5,15 +5,29 @@
 價格行為型態，在最新一根週K棒回踩「滿足區」時，計算下單四要素、繪製決策圖表，並推播到
 Telegram / Discord。
 
-## 型態定義（動態邊界版）
+## 型態定義（老余裸K五階段狀態機）
 
-1. **動態邊界（Boundary）**：以近期低點做線性回歸，抓出微正斜率（持平~小幅上揚）的通道邊界，而非固定水平線。
-2. **極深刺穿洗盤（Sweep）**：價格向下刺穿當時邊界（1.5%~22%），創出極限低點 `sweep_low`。
-3. **強勢收復（Peak 2）**：拉回站上刺穿當時的邊界水位，創出第二波峰 `peak2`。
-4. **滿足區（Satisfaction Zone）**：以「當前」動態邊界為中心，向上 3.5% / 向下 1.5% 的區間。
-5. **最新K棒回踩進場（Entry Signal）**：當前週K棒的低點落在滿足區內、收盤守穩區間下緣。
+策略源自台灣裸K價格行為交易體系（老余／余適安），核心心法「先有大格局邊界，再找小細節，
+吃在邊界，守在外面」，結合 J. Welles Wilder 翻亞當（Second Reflection，1:1 等距鏡像對稱）。
 
-輸出四橫線：目標停利（等距投射 `entry + (peak2 - sweep_low)`）／進場訊號／動態邊界／防守停損（`sweep_low * 0.992`）。
+`detect_boundary_shift()` 拆成五個明確階段，任何一檔標的目前卡在哪一關都會回傳出來：
+
+1. **狀態1 大格局邊界確立（Level Formation）**：回溯前段K棒，用線性回歸抓出動態邊界，
+   要求至少 2 次以上測試過的支撐低點，邊界容許走平或微幅向上（斜率上限 1.8%/週）。
+2. **狀態2 刺穿假跌破（Liquidity Sweep）**：深 V 刺穿邊界，深度需在 1.5%~20% 之間
+   （太淺是雜訊，太深視為真跌破）。
+3. **狀態3 強勢收復確認（Reclaim／翻亞當成立）**：刺穿後數根K棒內收盤站回邊界之上，
+   不能在低檔盤整拖太久；記錄反彈高點 Peak，計算翻亞當高度 `pattern_height = Peak - sweep_low`。
+4. **狀態4 滿足區回踩（Retest）**：老余核心戒律「絕不追高突破，只在回踩邊界時吃單」——
+   最新K棒須踩進滿足區（動態邊界 ×0.985~1.035）且收盤守穩。
+5. **狀態5 風控與停利定錨（Risk/Reward）**：`Entry = max(邊界, 當前低點)`、
+   `SL = sweep_low × 0.992`、`TP = Entry + pattern_height`，並套用 R/R ≥ 1.05 濾網。
+
+`detect_boundary_shift()` **永遠回傳一個 dict**（不會是 `None`），帶 `status` 欄位：
+只有 `STATUS_TRIGGERED` 才有完整下單四要素；其餘狀態（`STATUS_WATCHING_SWEEP` /
+`STATUS_WATCHING_RECLAIM` / `STATUS_WAITING_RETEST` / `STATUS_RR_REJECTED` 等）代表
+目前卡在哪一關，用來組成「潛在觀察名單」——尚未觸發，但已經走到型態關鍵階段、
+值得留意的標的。
 
 ## 觀察池範圍
 
@@ -29,9 +43,9 @@ Telegram / Discord。
 ├── .github/workflows/weekly_scan.yml   # 每週五 15:30 台灣時間排程，可手動 workflow_dispatch 測試
 ├── requirements.txt                    # Python 套件（已釘版本）
 └── src/
-    ├── scanner.py           # 主流程：下載 -> 偵測 -> 部位試算 -> 繪圖 -> 推播 -> 產出報告
+    ├── scanner.py           # 主流程：下載 -> 五階段狀態機偵測 -> 部位試算 -> 繪圖 -> 推播 -> 產出報告
     ├── data_fetcher.py       # yfinance 批次下載、清洗、分批重試（含 WATCHLIST_MAPPING）
-    ├── pattern_detector.py   # detect_boundary_shift()：動態斜率邊界 + 滿足區回踩 + 緊縮箱型進場/停損精算
+    ├── pattern_detector.py   # detect_boundary_shift()：老余裸K五階段狀態機（永遠回傳 dict，帶 status）
     ├── historical_satisfaction.py  # 「翻亞當」歷史滿足紀錄前置濾網（信任分數，非即時訊號）
     ├── visualizer.py         # plot_and_save()：中文字型註冊 + 滿足區框 + 四橫線圖
     ├── position_sizing.py    # calc_position_size()：依台股/美股自動切換幣別與成本模型

@@ -1,12 +1,17 @@
 """
 app.py
-Streamlit 網頁版：邊界重塑（Boundary Reset）訊號辨識工具。
+Streamlit 網頁版：邊界重塑（Boundary Reset）訊號辨識工具 —— 老余裸K五階段狀態機。
 
 兩個功能頁籤：
-1. 全市場掃描：對觀察池全部標的跑一次掃描，列出符合條件的標的並可查看圖表。
-2. 單一標的診斷：輸入任意代碼，立即檢查是否符合回踩條件。
+1. 全市場掃描：對觀察池全部標的跑一次掃描，列出正式觸發的標的、可查看圖表，
+   並列出「潛在觀察名單」（尚未觸發但已進入型態關鍵階段）。
+2. 單一標的診斷：輸入任意代碼，立即檢查目前停在五階段的哪一關。
 
 部署到 Streamlit Community Cloud（streamlit.io）時，Main file path 設為 app.py 即可。
+
+重要變更：pattern_detector.detect_boundary_shift() 現在永遠回傳一個 dict
+（帶 status 欄位），不再回傳 None，所以這裡一律用 res["status"] 判斷，
+不能再用 `if res:` 這種真假值判斷。
 """
 
 import os
@@ -22,16 +27,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src
 from data_fetcher import (  # noqa: E402
     fetch_all_watchlist, WATCHLIST_MAPPING, download_with_retry, prepare_dataframe,
 )
-from pattern_detector import detect_boundary_shift  # noqa: E402
+from pattern_detector import (  # noqa: E402
+    detect_boundary_shift,
+    STATUS_TRIGGERED, STATUS_WATCHING_RECLAIM, STATUS_WAITING_RETEST, STATUS_RR_REJECTED,
+)
 from historical_satisfaction import historical_satisfaction_score  # noqa: E402
 from position_sizing import calc_position_size  # noqa: E402
 from visualizer import plot_and_save  # noqa: E402
 
 CHART_DIR = os.path.join(tempfile.gettempdir(), "boundary_reset_charts")
 
+_STATUS_LABELS = {
+    STATUS_WATCHING_RECLAIM: "⏳ 等待強勢收復站回邊界",
+    STATUS_WAITING_RETEST: "🎯 已收復，等待回踩滿足區",
+    STATUS_RR_REJECTED: "⚠️ 已回踩滿足區，但風報比不足",
+}
+_WATCHLIST_STATUSES = set(_STATUS_LABELS.keys())
+
 st.set_page_config(page_title="邊界重塑訊號掃描器", page_icon="📈", layout="wide")
 st.title("📈 邊界重塑（Boundary Reset）訊號掃描器")
-st.caption("台股0050核心＋中型100精選＋美股大型科技，週K「深洗盤後重塑支撐」型態辨識")
+st.caption("台股0050核心＋中型100精選＋美股大型科技，老余裸K五階段狀態機辨識")
 
 with st.sidebar:
     st.header("⚙️ 參數設定")
@@ -59,10 +74,16 @@ with tab_scan:
             st.info(f"成功載入 {loaded}/{total} 檔標的")
 
         results = []
+        watchlist = []
         progress = st.progress(0.0)
         for i, (ticker, (name, df)) in enumerate(stock_data.items()):
             res = detect_boundary_shift(df)
-            if res:
+            status = res.get("status")
+
+            if status in _WATCHLIST_STATUSES:
+                watchlist.append({"ticker": ticker, "name": name, "status": status})
+
+            if status == STATUS_TRIGGERED:
                 pos = calc_position_size(ticker, res["entry_price"], res["stop_loss"],
                                           risk_amount_twd=risk_amount, usd_twd_rate=usd_rate)
                 try:
@@ -70,60 +91,72 @@ with tab_scan:
                 except Exception:
                     hist = {"total_patterns": 0, "satisfied_count": 0, "satisfaction_rate": None}
                 results.append({"ticker": ticker, "name": name, "df": df, "res": res, "pos": pos, "hist": hist})
+
             progress.progress((i + 1) / max(loaded, 1))
         progress.empty()
 
         st.session_state["scan_results"] = results
+        st.session_state["watchlist"] = watchlist
 
     results = st.session_state.get("scan_results")
+    watchlist = st.session_state.get("watchlist", [])
 
     if results is None:
         st.info("按上方按鈕開始掃描。")
-    elif not results:
-        st.warning("本次掃描全市場無符合邊界重塑回踩條件的標的。")
     else:
-        sorted_results = sorted(results, key=lambda r: r["res"]["rr_ratio"], reverse=True)
-        st.success(f"共找到 {len(sorted_results)} 檔符合條件的標的（依風報比排序）")
-
-        table_rows = [
-            {
-                "標的": r["name"],
-                "進場模式": "箱型精算" if r["res"].get("entry_mode") == "tight_box" else "舊公式",
-                "入場": round(r["res"]["entry_price"], 2),
-                "動態邊界": round(r["res"]["boundary"], 2),
-                "停損": round(r["res"]["stop_loss"], 2),
-                "停利": round(r["res"]["tp_adam"], 2),
-                "R/R": round(r["res"]["rr_ratio"], 2),
-                "建議部位": r["pos"]["unit_display"] if r["pos"] else "-",
-                "交割款估計": f"{r['pos']['currency']} {r['pos']['settlement_estimate']:,.0f}" if r["pos"] else "-",
-                "歷史滿足": f"{r['hist']['satisfied_count']}/{r['hist']['total_patterns']}",
-            }
-            for r in sorted_results
-        ]
-
-        st.caption("👆 點選下方表格的任一列，即可顯示對應的決策圖表")
-        event = st.dataframe(
-            pd.DataFrame(table_rows),
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-        )
-
-        selected_rows = event["selection"]["rows"]
-        st.divider()
-
-        if not selected_rows:
-            st.info("尚未選擇標的，請點選上方表格的某一列。")
+        if not results:
+            st.warning("本次掃描全市場無正式觸發的標的。")
         else:
-            chosen = sorted_results[selected_rows[0]]
-            st.subheader(f"📊 {chosen['name']} 決策圖表")
-            try:
-                img_path = plot_and_save(chosen["df"], chosen["ticker"], chosen["name"], chosen["res"],
-                                          output_dir=CHART_DIR)
-                st.image(img_path, use_container_width=True)
-            except Exception as e:
-                st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
+            sorted_results = sorted(results, key=lambda r: r["res"]["rr_ratio"], reverse=True)
+            st.success(f"共找到 {len(sorted_results)} 檔正式觸發的標的（依風報比排序）")
+
+            table_rows = [
+                {
+                    "標的": r["name"],
+                    "入場": round(r["res"]["entry_price"], 2),
+                    "動態邊界": round(r["res"]["boundary"], 2),
+                    "停損": round(r["res"]["stop_loss"], 2),
+                    "停利": round(r["res"]["tp_adam"], 2),
+                    "R/R": round(r["res"]["rr_ratio"], 2),
+                    "建議部位": r["pos"]["unit_display"] if r["pos"] else "-",
+                    "交割款估計": f"{r['pos']['currency']} {r['pos']['settlement_estimate']:,.0f}" if r["pos"] else "-",
+                    "歷史滿足": f"{r['hist']['satisfied_count']}/{r['hist']['total_patterns']}",
+                }
+                for r in sorted_results
+            ]
+
+            st.caption("👆 點選下方表格的任一列，即可顯示對應的決策圖表")
+            event = st.dataframe(
+                pd.DataFrame(table_rows),
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+
+            selected_rows = event["selection"]["rows"]
+            st.divider()
+
+            if not selected_rows:
+                st.info("尚未選擇標的，請點選上方表格的某一列。")
+            else:
+                chosen = sorted_results[selected_rows[0]]
+                st.subheader(f"📊 {chosen['name']} 決策圖表")
+                try:
+                    img_path = plot_and_save(chosen["df"], chosen["ticker"], chosen["name"], chosen["res"],
+                                              output_dir=CHART_DIR)
+                    st.image(img_path, use_container_width=True)
+                except Exception as e:
+                    st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
+
+        st.divider()
+        st.subheader("🔭 潛在觀察名單（尚未觸發，但已進入型態關鍵階段）")
+        if not watchlist:
+            st.caption("本次掃描無標的進入觀察階段。")
+        else:
+            watch_table = [{"標的": w["name"], "目前階段": _STATUS_LABELS.get(w["status"], w["status"])}
+                            for w in watchlist]
+            st.dataframe(pd.DataFrame(watch_table), use_container_width=True, hide_index=True)
 
 # ============================================================
 # Tab 2：單一標的診斷
@@ -144,8 +177,10 @@ with tab_single:
                 st.error("資料筆數不足（需至少 25 根週K棒），無法進行判斷")
             else:
                 res = detect_boundary_shift(df)
-                if res:
-                    st.success("✅ 符合邊界重塑回踩條件！")
+                status = res.get("status")
+
+                if status == STATUS_TRIGGERED:
+                    st.success("✅ 五階段全部通過，符合邊界重塑回踩條件！")
                     pos = calc_position_size(ticker_input, res["entry_price"], res["stop_loss"],
                                               risk_amount_twd=risk_amount, usd_twd_rate=usd_rate)
 
@@ -155,8 +190,6 @@ with tab_single:
                     c3.metric("停損", f"{res['stop_loss']:.2f}")
                     c4.metric("停利", f"{res['tp_adam']:.2f}")
                     st.metric("風報比 R/R", f"{res['rr_ratio']:.2f}")
-                    mode_note = "🎯 緊縮箱型精算" if res.get("entry_mode") == "tight_box" else "📐 退回舊公式"
-                    st.caption(f"進場模式：{mode_note}")
 
                     try:
                         hist = historical_satisfaction_score(df)
@@ -175,6 +208,9 @@ with tab_single:
                         st.image(img_path, use_container_width=True)
                     except Exception as e:
                         st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
+                elif status in _STATUS_LABELS:
+                    st.info(f"尚未觸發進場。目前階段：{_STATUS_LABELS[status]}")
+                    st.line_chart(df.set_index("DateStr")[["Close"]])
                 else:
-                    st.info("目前未符合邊界重塑回踩條件。")
+                    st.info("目前未偵測到符合條件的邊界重塑候選型態。")
                     st.line_chart(df.set_index("DateStr")[["Close"]])
