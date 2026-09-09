@@ -182,11 +182,12 @@ def write_report(triggers, watchlist=None, path="scan_summary.md"):
         if not watchlist:
             f.write("本週無標的進入觀察階段。\n")
         else:
-            f.write("| 標的 | 目前階段 |\n")
-            f.write("| :--- | :--- |\n")
+            f.write("| 標的 | 目前階段 | 診斷細節 |\n")
+            f.write("| :--- | :--- | :--- |\n")
             for w in watchlist:
                 label = _STATUS_LABELS.get(w["status"], w["status"])
-                f.write(f"| {w['name']} | {label} |\n")
+                reason = w.get("res", {}).get("reason", "-")
+                f.write(f"| {w['name']} | {label} | {reason} |\n")
 
 
 def main():

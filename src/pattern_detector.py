@@ -67,14 +67,15 @@ def _stage1_level_formation(df, s_idx, lookback_window, max_slope_pct_per_bar,
     要求：
       - 邊界走平或微幅向上（斜率百分比落在 [-0.5%, max_slope_pct_per_bar]）。
       - 至少有 min_touches 根K棒的低點貼近邊界（視為「測試過的支撐」）。
-    成立回傳 {slope, intercept, base_len, touches}，不成立回傳 None。
+    成立回傳 (result_dict, None)；不成立回傳 (None, reason_str) —— reason_str
+    帶著具體數字，方便追查「差在哪裡」而不用每次都用資料反推猜測。
     """
     if s_idx - lookback_window < 0:
-        return None
+        return None, "資料不足以回溯 lookback_window"
 
     base_df = df.iloc[s_idx - lookback_window: s_idx]
     if len(base_df) < lookback_window:
-        return None
+        return None, "資料不足以回溯 lookback_window"
 
     x_base = np.arange(len(base_df))
     y_lows = base_df["Low"].values
@@ -82,19 +83,19 @@ def _stage1_level_formation(df, s_idx, lookback_window, max_slope_pct_per_bar,
 
     base_mean_price = float(np.mean(y_lows))
     if base_mean_price <= 0:
-        return None
+        return None, "基準價格無效"
 
     slope_pct = slope / base_mean_price
     if not (-0.005 <= slope_pct <= max_slope_pct_per_bar):
-        return None
+        return None, f"邊界斜率 {slope_pct*100:.2f}%/週，超出允許範圍 [-0.5%, {max_slope_pct_per_bar*100:.1f}%]"
 
     fitted = intercept + slope * x_base
     touches = int(np.sum(np.abs(y_lows - fitted) / fitted <= touch_tolerance_pct))
     if touches < min_touches:
-        return None
+        return None, f"邊界只被測試過 {touches} 次，未達最低要求 {min_touches} 次"
 
     return {"slope": float(slope), "intercept": float(intercept),
-            "base_len": len(base_df), "touches": touches}
+            "base_len": len(base_df), "touches": touches}, None
 
 
 def _boundary_at(level, position_from_base_start):
@@ -110,17 +111,21 @@ def _stage2_sweep(df, s_idx, level, min_sweep_pct, max_sweep_pct):
     檢查 s_idx 這根K棒是否構成有效的「刺穿假跌破」：
     跌破當時邊界的深度需落在 [min_sweep_pct, max_sweep_pct] 之間
     （太淺是雜訊，太深視為真跌破/倒莊，不是假跌破）。
+
+    回傳 (result_dict_or_None, sweep_pct)：sweep_pct 無論成功與否都會回傳，
+    方便呼叫端在失敗時記錄「差多少沒過關」，不用每次都靠外部反推猜測。
     """
     boundary_at_sweep = _boundary_at(level, level["base_len"])
     if boundary_at_sweep <= 0:
-        return None
+        return None, None
 
     sweep_low = float(df.loc[s_idx, "Low"])
     sweep_pct = (boundary_at_sweep - sweep_low) / boundary_at_sweep
     if not (min_sweep_pct <= sweep_pct <= max_sweep_pct):
-        return None
+        return None, sweep_pct
 
-    return {"boundary_at_sweep": boundary_at_sweep, "sweep_low": sweep_low, "sweep_pct": sweep_pct}
+    return {"boundary_at_sweep": boundary_at_sweep, "sweep_low": sweep_low,
+            "sweep_pct": sweep_pct}, sweep_pct
 
 
 # ==============================================================================
@@ -131,31 +136,33 @@ def _stage3_reclaim(df, s_idx, last_idx, sweep, max_bars_to_reclaim=6):
     要求刺穿後數根K棒內，收盤價要明確站回邊界之上，且不能在低檔盤整拖太久
     （超過 max_bars_to_reclaim 根都沒收復，視為破位確立、型態失敗）。
     收復後記錄波段最高點 Peak，計算翻亞當高度 pattern_height = Peak - L_sweep。
+
+    回傳 (result_dict, None) 或 (None, reason_str)，reason_str 附上具體數字。
     """
     post_sweep = df.iloc[s_idx + 1: last_idx]
     if len(post_sweep) < 2:
-        return None
+        return None, "刺穿後可用K棒不足2根，無法判斷是否收復"
 
     closes = post_sweep["Close"].values
     reclaim_hits = np.where(closes > sweep["boundary_at_sweep"])[0]
     if len(reclaim_hits) == 0:
-        return None
+        return None, "到目前為止收盤價都沒有站回邊界之上"
 
     bars_to_reclaim = int(reclaim_hits[0]) + 1
     if bars_to_reclaim > max_bars_to_reclaim:
-        return None  # 在低檔盤整拖太久，型態不成立
+        return None, f"收復花了 {bars_to_reclaim} 根K棒，超過允許的 {max_bars_to_reclaim} 根（低檔盤整拖太久）"
 
     peak2_local_idx = int(np.argmax(post_sweep["High"].values))
     peak2 = float(post_sweep["High"].iloc[peak2_local_idx])
     peak2_idx = s_idx + 1 + peak2_local_idx
 
     if peak2 < sweep["boundary_at_sweep"]:
-        return None
+        return None, "收復後的反彈高點仍未站上邊界"
 
     pattern_height = peak2 - sweep["sweep_low"]
 
     return {"peak2": peak2, "peak2_idx": peak2_idx, "pattern_height": pattern_height,
-            "bars_to_reclaim": bars_to_reclaim}
+            "bars_to_reclaim": bars_to_reclaim}, None
 
 
 # ==============================================================================
@@ -249,7 +256,7 @@ def detect_boundary_shift(
     lookback_window=12,
     max_bars_since_sweep=12,
     min_sweep_pct=0.015,
-    max_sweep_pct=0.20,
+    max_sweep_pct=0.22,
     max_slope_pct_per_bar=0.018,
     max_bars_to_reclaim=6,
     min_rr=1.05,
@@ -260,11 +267,15 @@ def detect_boundary_shift(
     """
     永遠回傳一個 dict（不再回傳 None）。
     status == STATUS_TRIGGERED 時，dict 帶完整下單四要素；
-    其餘狀態的 dict 帶目前偵測到、最值得關注的中繼資訊，可用來組觀察名單。
+    其餘狀態的 dict 帶目前偵測到、最值得關注的中繼資訊（含 "reason" 診斷文字），
+    可用來組觀察名單、或追查「為什麼這檔沒被抓到」。
+
+    註：max_sweep_pct 預設 22%（原始規格建議 20%，但實測欣興(3037)
+    的洗盤深度約 20.36%，卡在 20% 門檻外——改回 22% 較貼合實盤情況）。
     """
     total = len(df)
     if total < lookback_window + 8:
-        return {"status": STATUS_INSUFFICIENT_DATA}
+        return {"status": STATUS_INSUFFICIENT_DATA, "reason": "資料筆數不足"}
 
     last_idx = total - 1
 
@@ -284,28 +295,35 @@ def detect_boundary_shift(
 
     for s_idx in range(last_idx - 2, scan_from, -1):
         # ---- 狀態 1：大格局邊界確立 ----
-        level = _stage1_level_formation(
+        level, level_reason = _stage1_level_formation(
             df, s_idx, lookback_window, max_slope_pct_per_bar, touch_tolerance_pct, min_touches
         )
         if level is None:
+            _update_best(STATUS_NO_VALID_LEVEL, {"sweep_idx": s_idx, "reason": level_reason})
             continue  # 這個候選點連邊界都立不住，看下一個候選
 
         # ---- 狀態 2：刺穿假跌破 ----
-        sweep = _stage2_sweep(df, s_idx, level, min_sweep_pct, max_sweep_pct)
+        sweep, sweep_pct_attempt = _stage2_sweep(df, s_idx, level, min_sweep_pct, max_sweep_pct)
         if sweep is None:
+            reason = None
+            if sweep_pct_attempt is not None:
+                reason = (f"洗盤深度 {sweep_pct_attempt*100:.2f}%，"
+                          f"超出允許範圍 [{min_sweep_pct*100:.1f}%, {max_sweep_pct*100:.1f}%]")
             _update_best(STATUS_WATCHING_SWEEP, {
                 "sweep_idx": s_idx,
                 "boundary": _boundary_at(level, level["base_len"]),
+                "reason": reason,
             })
             continue
 
         # ---- 狀態 3：強勢收復確認（翻亞當條件成立）----
-        reclaim = _stage3_reclaim(df, s_idx, last_idx, sweep, max_bars_to_reclaim)
+        reclaim, reclaim_reason = _stage3_reclaim(df, s_idx, last_idx, sweep, max_bars_to_reclaim)
         if reclaim is None:
             _update_best(STATUS_WATCHING_RECLAIM, {
                 "sweep_idx": s_idx,
                 "sweep_low": sweep["sweep_low"],
                 "boundary_at_sweep": sweep["boundary_at_sweep"],
+                "reason": reclaim_reason,
             })
             continue
 
