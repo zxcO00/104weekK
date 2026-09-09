@@ -210,7 +210,11 @@ with tab_single:
                         st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
                 elif status in _STATUS_LABELS:
                     st.info(f"尚未觸發進場。目前階段：{_STATUS_LABELS[status]}")
+                    if res.get("reason"):
+                        st.caption(f"🔍 診斷：{res['reason']}")
                     st.line_chart(df.set_index("DateStr")[["Close"]])
                 else:
                     st.info("目前未偵測到符合條件的邊界重塑候選型態。")
+                    if res.get("reason"):
+                        st.caption(f"🔍 診斷：{res['reason']}")
                     st.line_chart(df.set_index("DateStr")[["Close"]])
