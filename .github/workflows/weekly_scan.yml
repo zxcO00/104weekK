@@ -36,6 +36,7 @@ jobs:
           POSITION_RISK_AMOUNT_TWD: "10000"
           USD_TWD_RATE: "32.0"
           MIN_HISTORICAL_SATISFACTIONS: "0"
+          ENABLE_DAILY_REFINEMENT: "1"
         run: python scanner.py
 
       - name: Upload scan results as artifact
