@@ -97,10 +97,16 @@ def download_with_retry(tickers, batch_size=15, max_retries=3, retry_wait=2.5, *
     return all_data
 
 
-def prepare_dataframe(raw_df):
-    """清洗單一標的原始資料，回傳附帶 DateStr / Vol_MA 的標準化 DataFrame，不足資料回傳 None"""
+def prepare_dataframe(raw_df, min_rows=25):
+    """
+    清洗單一標的原始資料，回傳附帶 DateStr / Vol_MA 的標準化 DataFrame，
+    不足 min_rows 筆回傳 None。
+
+    min_rows 預設 25（週K型態偵測需要的最小樣本數）；日K精算打擊區時
+    只需要一小段最近的資料，呼叫時可以把 min_rows 降低（例如設 1）。
+    """
     df = clean_yf_df(raw_df).dropna().copy()
-    if len(df) < 25:
+    if len(df) < min_rows:
         return None
 
     df = df.reset_index()

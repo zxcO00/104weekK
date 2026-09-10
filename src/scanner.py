@@ -21,6 +21,7 @@ from pattern_detector import (
     STATUS_TRIGGERED, STATUS_WATCHING_RECLAIM, STATUS_WAITING_RETEST, STATUS_RR_REJECTED,
 )
 from historical_satisfaction import historical_satisfaction_score
+from daily_refinement import refine_with_daily
 from visualizer import plot_and_save
 from position_sizing import calc_position_size
 from notifier import (
@@ -31,6 +32,10 @@ from notifier import (
 DATA_PERIOD = os.environ.get("DATA_PERIOD", "2y")
 DATA_INTERVAL = os.environ.get("DATA_INTERVAL", "1wk")
 BATCH_SIZE = int(os.environ.get("YF_BATCH_SIZE", 15))
+
+# 是否啟用「週K定方向、日K精算打擊區/停損」的雙時間週期模式。
+# 預設開啟；關閉的話停損維持完全用週K計算（跟舊版行為一致）。
+ENABLE_DAILY_REFINEMENT = os.environ.get("ENABLE_DAILY_REFINEMENT", "1") == "1"
 
 # 歷史滿足紀錄前置濾網門檻：預設 0 代表不濾掉任何訊號，只是把統計資料附加到報告裡。
 # 等回測驗證過合理門檻後，再調高這個環境變數即可啟用真正的過濾。
@@ -76,6 +81,14 @@ def run_scan():
         if status != STATUS_TRIGGERED:
             continue
 
+        # 雙時間週期精算：用日K資料重新精算打擊區局部低點/停損（週K找方向，日K定打擊區）
+        if ENABLE_DAILY_REFINEMENT:
+            try:
+                res = refine_with_daily(ticker, df, res)
+            except Exception as e:
+                print(f"⚠️ {ticker} 日K精算發生例外，退回週K版本結果: {e}")
+                res["daily_refined"] = False
+
         # 歷史滿足紀錄前置濾網（信任分數，非即時訊號本身）
         try:
             hist = historical_satisfaction_score(df)
@@ -101,8 +114,14 @@ def run_scan():
         print("=" * 65)
         print(f"【本週即時觸發】 {prefix} {name}（日期: {res['date']}）")
         print(f">> 入場價: {res['entry_price']:.2f} | 動態邊界: {res['boundary']:.2f}")
+        if res.get("daily_refined"):
+            print(f">> 📐 停損已套用日K精算（{res.get('daily_zone_start_date')} ~ {res.get('daily_zone_end_date')}，共{res.get('daily_zone_bar_count')}根日K）")
+        elif ENABLE_DAILY_REFINEMENT:
+            print(f">> ⚠️ 日K精算失敗，停損維持週K版本計算（原因: {res.get('daily_refine_reason', '未知')}）")
         if res.get("zone_too_tight"):
             print(">> ⚠️ 打擊區過窄（反彈高點才發生沒幾根K棒，回檔尚未止穩），停損已套用風險下限")
+        zone_emoji = "🟢" if res.get("zone_label") == "下緣" else "🔴"
+        print(f">> {zone_emoji} 相對長期趨勢線: {res.get('zone_label')}（{res.get('trend_deviation_pct', 0)*100:+.1f}%）")
         print(f">> 防守停損: {res['stop_loss']:.2f} | 目標停利: {res['tp_adam']:.2f} | 風報比: {res['rr_ratio']:.2f}")
         if pos:
             print(
@@ -155,26 +174,28 @@ def write_report(triggers, watchlist=None, path="scan_summary.md"):
             sorted_triggers = sorted(triggers, key=lambda t: t["res"]["rr_ratio"], reverse=True)
 
             f.write("### 正式觸發清單\n\n")
-            f.write("| 標的 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 歷史滿足 | 打擊區 | 圖表 |\n")
-            f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+            f.write("| 標的 | 入場 | 動態邊界 | 停損 | 停利 | R/R | 建議部位 | 交割款估計 | 歷史滿足 | 打擊區 | 停損來源 | 趨勢位置 | 圖表 |\n")
+            f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
             for t in sorted_triggers:
                 name, res, pos = t["name"], t["res"], t["pos"]
                 chart_note = "✅" if t["img_path"] else "⚠️失敗"
                 hist = t.get("hist") or {"satisfied_count": 0, "total_patterns": 0}
                 hist_note = f"{hist['satisfied_count']}/{hist['total_patterns']}"
                 zone_note = "⚠️過窄" if res.get("zone_too_tight") else "✅"
+                trend_note = f"{res.get('zone_label', '-')}（{res.get('trend_deviation_pct', 0)*100:+.1f}%）"
+                sl_source_note = "日K精算" if res.get("daily_refined") else "週K版本"
                 if pos:
                     f.write(
                         f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
                         f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | "
                         f"{pos['unit_display']} | {pos['currency']} {pos['settlement_estimate']:,.0f} | "
-                        f"{hist_note} | {zone_note} | {chart_note} |\n"
+                        f"{hist_note} | {zone_note} | {sl_source_note} | {trend_note} | {chart_note} |\n"
                     )
                 else:
                     f.write(
                         f"| {name} | {res['entry_price']:.2f} | {res['boundary']:.2f} | "
                         f"{res['stop_loss']:.2f} | {res['tp_adam']:.2f} | {res['rr_ratio']:.2f} | - | - | "
-                        f"{hist_note} | {zone_note} | {chart_note} |\n"
+                        f"{hist_note} | {zone_note} | {sl_source_note} | {trend_note} | {chart_note} |\n"
                     )
 
 

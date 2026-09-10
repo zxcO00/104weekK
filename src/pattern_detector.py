@@ -44,6 +44,7 @@ STATUS_WATCHING_SWEEP = "STATUS_WATCHING_SWEEP"        # 邊界已成立，等�
 STATUS_WATCHING_RECLAIM = "STATUS_WATCHING_RECLAIM"    # 洗盤已現，等待強勢收復站回邊界
 STATUS_WAITING_RETEST = "STATUS_WAITING_RETEST"        # 已收復，等待回踩滿足區
 STATUS_RR_REJECTED = "STATUS_RR_REJECTED"              # 已回踩滿足區，但風報比不足
+STATUS_UPPER_ZONE_REJECTED = "STATUS_UPPER_ZONE_REJECTED"  # 五階段皆通過，但型態發生在價格區間上緣（不符偏好設定）
 STATUS_TRIGGERED = "STATUS_TRIGGERED"                  # 五階段全部滿足，正式觸發進場
 
 # 狀態的「進度排名」，數字越大代表越接近觸發，用來在多個候選洗盤點裡挑出
@@ -54,6 +55,7 @@ _STATUS_RANK = {
     STATUS_WATCHING_RECLAIM: 2,
     STATUS_WAITING_RETEST: 3,
     STATUS_RR_REJECTED: 4,
+    STATUS_UPPER_ZONE_REJECTED: 5,
 }
 
 
@@ -215,6 +217,42 @@ def _find_strike_zone(df, retest_start_idx, last_idx):
     return {"zone_low": zone_low, "zone_high": zone_high, "zone_start_idx": retest_start_idx}
 
 
+def _classify_range_position(df, reference_price, lookback_bars=None):
+    """
+    判斷這次型態的進場價，落在股價「長期成長趨勢線」的上方還是下方——
+    不是看區間百分比位置，而是用整段資料做對數線性回歸抓出長期趨勢，
+    比較目前進場價跟趨勢線在這個時間點的理論值：
+      進場價 < 趨勢線 -> 下緣（相對趨勢便宜，優先偏好）
+      進場價 > 趨勢線 -> 上緣（相對趨勢偏貴，即使型態成立也是較不理想的位置）
+
+    用對數（而非原始價格）做回歸，是因為股價成長通常是複合/百分比性質
+    （例如從140漲到1230是好幾倍，不是等差成長），用對數回歸抓出的趨勢線
+    才能正確反映「相對於長期成長軌跡，現在是貴還是便宜」，而不會被
+    最近一段爆量式的價格漲幅整個拉歪趨勢線。
+
+    trend_deviation_pct：正值代表進場價高於趨勢線（上緣），負值代表低於（下緣）。
+    """
+    fit_df = df.iloc[-lookback_bars:] if lookback_bars and len(df) > lookback_bars else df
+
+    mid_prices = ((fit_df["High"] + fit_df["Low"]) / 2).values
+    mid_prices = np.clip(mid_prices, 1e-6, None)  # 避免 log(0) 或負值
+    x = np.arange(len(fit_df))
+    slope, intercept = np.polyfit(x, np.log(mid_prices), 1)
+
+    trend_price = float(np.exp(intercept + slope * (len(fit_df) - 1)))
+    if trend_price <= 0:
+        return {"zone_label": "下緣", "trend_deviation_pct": 0.0, "trend_price": trend_price}
+
+    trend_deviation_pct = (reference_price - trend_price) / trend_price
+    zone_label = "下緣" if reference_price < trend_price else "上緣"
+
+    return {
+        "zone_label": zone_label,
+        "trend_deviation_pct": trend_deviation_pct,
+        "trend_price": trend_price,
+    }
+
+
 # ==============================================================================
 # 狀態 5：老余流風控與停利定錨（Risk / Reward）
 # ==============================================================================
@@ -279,6 +317,8 @@ def detect_boundary_shift(
     min_touches=2,
     local_low_buffer=0.01,
     min_risk_pct=0.02,
+    range_lookback_bars=None,
+    require_lower_zone=False,
 ):
     """
     永遠回傳一個 dict（不再回傳 None）。
@@ -374,6 +414,19 @@ def detect_boundary_shift(
             })
             continue
 
+        # ---- 上緣/下緣判斷（合作夥伴偏好：相對長期成長趨勢線，優先做下緣）----
+        range_info = _classify_range_position(df, risk_reward["entry_price"], range_lookback_bars)
+
+        if require_lower_zone and range_info["zone_label"] == "上緣":
+            _update_best(STATUS_UPPER_ZONE_REJECTED, {
+                "sweep_idx": s_idx,
+                "boundary": retest["boundary_at_current"],
+                "trend_deviation_pct": range_info["trend_deviation_pct"],
+                "reason": (f"型態發生在長期趨勢線上緣（高於趨勢線 {range_info['trend_deviation_pct']*100:.1f}%），"
+                          f"不符合「只做下緣」的偏好設定"),
+            })
+            continue
+
         # ---- 五階段全部通過：正式觸發進場 ----
         return {
             "status": STATUS_TRIGGERED,
@@ -391,6 +444,9 @@ def detect_boundary_shift(
             "strike_zone_low": strike_zone["zone_low"],
             "strike_zone_start_idx": strike_zone["zone_start_idx"],
             "zone_too_tight": risk_reward["zone_too_tight"],
+            "zone_label": range_info["zone_label"],
+            "trend_deviation_pct": range_info["trend_deviation_pct"],
+            "trend_price": range_info["trend_price"],
             "risk": risk_reward["risk"],
             "reward": risk_reward["reward"],
             "rr_ratio": risk_reward["rr_ratio"],
