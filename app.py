@@ -34,7 +34,7 @@ from pattern_detector import (  # noqa: E402
 from historical_satisfaction import historical_satisfaction_score  # noqa: E402
 from daily_refinement import refine_with_daily  # noqa: E402
 from position_sizing import calc_position_size  # noqa: E402
-from visualizer import plot_and_save  # noqa: E402
+from visualizer import plot_and_save, plot_daily_chart  # noqa: E402
 
 CHART_DIR = os.path.join(tempfile.gettempdir(), "boundary_reset_charts")
 
@@ -56,6 +56,7 @@ with st.sidebar:
     period = st.selectbox("資料回看區間", ["1y", "2y", "3y"], index=1)
     only_lower_zone = st.checkbox("只顯示下緣型態（低於長期趨勢線）", value=False)
     enable_daily_refinement = st.checkbox("啟用日K精算停損（週K定方向，日K定打擊區）", value=True)
+    show_daily_chart = st.checkbox("顯示日K圖表（可選，需先啟用日K精算）", value=False)
     st.divider()
     st.caption("⚠️ 本工具僅供型態研究參考，非投資建議。")
     st.caption("全市場掃描約需 1-3 分鐘，視 Yahoo Finance 回應速度而定。")
@@ -160,13 +161,25 @@ with tab_scan:
                 st.info("尚未選擇標的，請點選上方表格的某一列。")
             else:
                 chosen = sorted_results[selected_rows[0]]
-                st.subheader(f"📊 {chosen['name']} 決策圖表")
+                st.subheader(f"📊 {chosen['name']} 決策圖表（週K）")
                 try:
                     img_path = plot_and_save(chosen["df"], chosen["ticker"], chosen["name"], chosen["res"],
                                               output_dir=CHART_DIR)
                     st.image(img_path, use_container_width=True)
                 except Exception as e:
                     st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
+
+                if show_daily_chart:
+                    if chosen["res"].get("daily_refined") and chosen["res"].get("daily_df") is not None:
+                        st.subheader(f"🔍 {chosen['name']} 日K精算檢視")
+                        try:
+                            daily_img_path = plot_daily_chart(chosen["res"]["daily_df"], chosen["ticker"],
+                                                               chosen["name"], chosen["res"], output_dir=CHART_DIR)
+                            st.image(daily_img_path, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"日K圖表產生失敗：{e}")
+                    else:
+                        st.caption("此標的沒有可用的日K精算資料（可能是日K下載失敗或未啟用日K精算），無法顯示日K圖表。")
 
         st.divider()
         st.subheader("🔭 潛在觀察名單（尚未觸發，但已進入型態關鍵階段）")
@@ -242,6 +255,18 @@ with tab_single:
                         st.image(img_path, use_container_width=True)
                     except Exception as e:
                         st.error(f"圖表產生失敗（訊號本身仍有效）：{e}")
+
+                    if show_daily_chart:
+                        if res.get("daily_refined") and res.get("daily_df") is not None:
+                            st.subheader(f"🔍 {ticker_input} 日K精算檢視")
+                            try:
+                                daily_img_path = plot_daily_chart(res["daily_df"], ticker_input, ticker_input,
+                                                                   res, output_dir=CHART_DIR)
+                                st.image(daily_img_path, use_container_width=True)
+                            except Exception as e:
+                                st.error(f"日K圖表產生失敗：{e}")
+                        else:
+                            st.caption("此標的沒有可用的日K精算資料（可能是日K下載失敗或未啟用日K精算），無法顯示日K圖表。")
                 elif status in _STATUS_LABELS:
                     st.info(f"尚未觸發進場。目前階段：{_STATUS_LABELS[status]}")
                     if res.get("reason"):
