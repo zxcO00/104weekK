@@ -37,6 +37,7 @@ jobs:
           USD_TWD_RATE: "32.0"
           MIN_HISTORICAL_SATISFACTIONS: "0"
           ENABLE_DAILY_REFINEMENT: "1"
+          ENABLE_DAILY_CHART: "0"
         run: python scanner.py
 
       - name: Upload scan results as artifact
