@@ -58,10 +58,11 @@ def refine_with_daily(ticker, weekly_df, res, local_low_buffer=0.01, min_risk_pc
         return res
 
     peak2_date = weekly_df.loc[peak2_idx, "DateStr"]
+    chart_start_date = (pd.to_datetime(peak2_date) - pd.Timedelta(days=15)).strftime("%Y-%m-%d")
 
     try:
         daily_raw = download_with_retry(
-            [ticker], batch_size=1, start=peak2_date, interval="1d", auto_adjust=True
+            [ticker], batch_size=1, start=chart_start_date, interval="1d", auto_adjust=True
         )
     except Exception as e:
         res["daily_refined"] = False
@@ -108,6 +109,7 @@ def refine_with_daily(ticker, weekly_df, res, local_low_buffer=0.01, min_risk_pc
         "daily_zone_start_date": zone["zone_start_date"],
         "daily_zone_end_date": zone["zone_end_date"],
         "daily_zone_bar_count": zone["bar_count"],
+        "daily_df": daily_df,  # 保留日K資料，方便呼叫端直接畫日K圖表，不用重新下載
     })
 
     return res

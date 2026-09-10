@@ -100,6 +100,32 @@ def send_discord_alert(name, res, img_path, pos=None, is_us=False):
         return False
 
 
+def send_telegram_photo(img_path, caption=""):
+    """
+    通用圖片推播（不依賴 res 的下單四要素）——用於日K精算檢視圖這種附加圖表，
+    只需要圖片本身跟一句說明文字。
+    """
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
+        return False
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    try:
+        with open(img_path, "rb") as photo:
+            resp = requests.post(
+                url,
+                data={"chat_id": chat_id, "caption": caption},
+                files={"photo": photo},
+                timeout=15,
+            )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ Telegram 圖片推播失敗: {e}")
+        return False
+
+
 def send_failure_notice(error_message):
     """掃描流程整體失敗時的告警"""
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")

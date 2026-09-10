@@ -191,3 +191,103 @@ def plot_and_save(df, ticker, name, res, output_dir="output"):
     plt.savefig(file_path, dpi=120, facecolor="#131722")
     plt.close(fig)
     return file_path
+
+
+def plot_daily_chart(daily_df, ticker, name, res, output_dir="output"):
+    """
+    畫出日K版本的決策圖表（可選功能）——放大檢視「週K定方向、日K精算打擊區」
+    這段回踩期間的日K細節，讓使用者能直接看到日K局部低點，不用只看數字。
+
+    daily_df 來自 daily_refinement.refine_with_daily() 回傳的 res["daily_df"]，
+    涵蓋範圍是週K反彈高點往前15天，到最新一個交易日。
+    """
+    setup_chinese_font()
+
+    os.makedirs(output_dir, exist_ok=True)
+    clean_code = ticker.replace(".TW", "").replace(".TWO", "")
+
+    df = daily_df.reset_index(drop=True)
+    last_row = df.iloc[-1]
+    prev_row = df.iloc[-2] if len(df) >= 2 else last_row
+
+    cur_c = float(last_row["Close"])
+    prev_c = float(prev_row["Close"])
+    change = cur_c - prev_c
+    change_pct = (change / prev_c) * 100 if prev_c != 0 else 0.0
+    sign = "+" if change > 0 else ""
+    title_color = "#FF3B30" if change > 0 else ("#00F5FF" if change < 0 else "#FFFFFF")
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6.8), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
+    fig.patch.set_facecolor("#131722")
+    ax1.set_facecolor("#131722")
+    ax2.set_facecolor("#131722")
+
+    x_indices = np.arange(len(df))
+    width = 0.55
+    up = (df["Close"] >= df["Open"]).values
+    down = (df["Close"] < df["Open"]).values
+
+    ax1.vlines(x_indices[up], df.loc[up, "Low"], df.loc[up, "High"], color="#FF3B30", linewidth=1.2)
+    ax1.bar(x_indices[up], df.loc[up, "Close"] - df.loc[up, "Open"], width,
+            bottom=df.loc[up, "Open"], color="#FF3B30", edgecolor="#FF3B30")
+    ax1.vlines(x_indices[down], df.loc[down, "Low"], df.loc[down, "High"], color="#00F5FF", linewidth=1.2)
+    ax1.bar(x_indices[down], df.loc[down, "Open"] - df.loc[down, "Close"], width,
+            bottom=df.loc[down, "Close"], color="#00F5FF", edgecolor="#00F5FF")
+
+    # 打擊區（黃框）—— 用日K精算出來的實際範圍與起始日期，包覆日K版打擊區
+    zone_start_date = res.get("daily_zone_start_date")
+    zone_high = res.get("strike_zone_high")
+    zone_low = res.get("strike_zone_low")
+    if zone_start_date and zone_high is not None and zone_low is not None:
+        match = df.index[df["DateStr"] == zone_start_date]
+        zone_start_x = int(match[0]) if len(match) > 0 else 0
+        box_x = zone_start_x - 0.4
+        box_w = (len(df) - 1 - zone_start_x) + 0.8
+        rect = patches.Rectangle(
+            (box_x, zone_low), box_w, max(zone_high - zone_low, 1e-6),
+            linewidth=2, edgecolor="#FFD700", facecolor="#FFD700", alpha=0.18, label="打擊區（日K精算）",
+        )
+        ax1.add_patch(rect)
+
+    # 四條核心決策線（跟週K圖共用同一組數值，數字上完全一致）
+    ax1.axhline(y=res["tp_adam"], color="#00FF7F", linestyle="-", linewidth=2.0,
+                label=f"目標停利 ({res['tp_adam']:.2f})")
+    ax1.axhline(y=res["entry_price"], color="#00E5FF", linestyle="-.", linewidth=2.0,
+                label=f"進場訊號 ({res['entry_price']:.2f})")
+    ax1.axhline(y=res["boundary"], color="#FFD700", linestyle="-", linewidth=1.2, alpha=0.6,
+                label=f"動態邊界 ({res['boundary']:.2f})")
+    ax1.axhline(y=res["stop_loss"], color="#FF3B30", linestyle="--", linewidth=1.8,
+                label=f"防守停損 ({res['stop_loss']:.2f})")
+
+    max_p = max(float(df["High"].max()), res["tp_adam"])
+    min_p = min(float(df["Low"].min()), res["stop_loss"])
+    p_range = max_p - min_p
+    ax1.set_ylim(min_p - p_range * 0.18, max_p + p_range * 0.18)
+
+    step = max(len(df) // 8, 1)
+    ax2.set_xticks(x_indices[::step])
+    ax2.set_xticklabels(df["DateStr"].iloc[::step], rotation=15, ha="right", color="white", fontsize=9)
+
+    main_title = f"[日K精算檢視] {name}  {cur_c:.2f}  {sign}{change:.2f} ({sign}{change_pct:.2f}%)"
+    sub_title = f"顯示範圍: {df.iloc[0]['DateStr']} ~ {df.iloc[-1]['DateStr']}（共{len(df)}個交易日）"
+
+    ax1.set_title(f"{main_title}\n{sub_title}", color=title_color, fontsize=12, fontweight="bold", loc="left", pad=10)
+    ax1.set_ylabel("價格", color="white", fontsize=11)
+    ax1.tick_params(colors="white")
+    ax1.grid(True, color="#2A2E39", linestyle=":", alpha=0.6)
+    ax1.legend(loc="upper left", facecolor="#1E222D", edgecolor="none", labelcolor="white", fontsize=9)
+
+    ax2.bar(x_indices[up], df.loc[up, "Volume"], width, color="#FF3B30", alpha=0.6)
+    ax2.bar(x_indices[down], df.loc[down, "Volume"], width, color="#00F5FF", alpha=0.6)
+    if "Vol_MA" in df.columns:
+        ax2.plot(x_indices, df["Vol_MA"], color="yellow", linestyle=":", label="10 日均量")
+    ax2.set_ylabel("成交量", color="white", fontsize=10)
+    ax2.tick_params(colors="white")
+    ax2.grid(True, color="#2A2E39", linestyle=":", alpha=0.6)
+    ax2.legend(loc="upper left", facecolor="#1E222D", edgecolor="none", labelcolor="white", fontsize=8.5)
+
+    plt.tight_layout()
+    file_path = os.path.join(output_dir, f"{clean_code}_daily_refine.png")
+    plt.savefig(file_path, dpi=120, facecolor="#131722")
+    plt.close(fig)
+    return file_path

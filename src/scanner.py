@@ -22,10 +22,10 @@ from pattern_detector import (
 )
 from historical_satisfaction import historical_satisfaction_score
 from daily_refinement import refine_with_daily
-from visualizer import plot_and_save
+from visualizer import plot_and_save, plot_daily_chart
 from position_sizing import calc_position_size
 from notifier import (
-    send_telegram_alert, send_discord_alert, send_telegram_text,
+    send_telegram_alert, send_discord_alert, send_telegram_text, send_telegram_photo,
     send_failure_notice, send_data_warning,
 )
 
@@ -36,6 +36,9 @@ BATCH_SIZE = int(os.environ.get("YF_BATCH_SIZE", 15))
 # 是否啟用「週K定方向、日K精算打擊區/停損」的雙時間週期模式。
 # 預設開啟；關閉的話停損維持完全用週K計算（跟舊版行為一致）。
 ENABLE_DAILY_REFINEMENT = os.environ.get("ENABLE_DAILY_REFINEMENT", "1") == "1"
+
+# 是否額外產生並推播日K精算檢視圖（可選功能，預設關閉）。
+ENABLE_DAILY_CHART = os.environ.get("ENABLE_DAILY_CHART", "0") == "1"
 
 # 歷史滿足紀錄前置濾網門檻：預設 0 代表不濾掉任何訊號，只是把統計資料附加到報告裡。
 # 等回測驗證過合理門檻後，再調高這個環境變數即可啟用真正的過濾。
@@ -154,6 +157,14 @@ def run_scan():
                 send_discord_alert(name, res, trigger["img_path"], pos, is_us)
         except Exception as e:
             print(f"⚠️ {ticker} Discord 推播失敗: {e}")
+
+        # 可選功能：額外產生並推播日K精算檢視圖（預設關閉）
+        if ENABLE_DAILY_CHART and res.get("daily_refined") and res.get("daily_df") is not None:
+            try:
+                daily_img_path = plot_daily_chart(res["daily_df"], ticker, name, res)
+                send_telegram_photo(daily_img_path, caption=f"🔍 {name} 日K精算檢視圖")
+            except Exception as e:
+                print(f"⚠️ {ticker} 日K圖表產生/推播失敗: {e}")
 
     if plot_failures:
         print(f"\n⚠️ 共有 {plot_failures} 檔標的繪圖失敗（可能是中文字型下載問題），但訊號已保留在報告中。")
