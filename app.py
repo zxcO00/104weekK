@@ -32,6 +32,7 @@ from pattern_detector import (  # noqa: E402
     STATUS_TRIGGERED, STATUS_WATCHING_RECLAIM, STATUS_WAITING_RETEST, STATUS_RR_REJECTED,
 )
 from historical_satisfaction import historical_satisfaction_score  # noqa: E402
+from daily_refinement import refine_with_daily  # noqa: E402
 from position_sizing import calc_position_size  # noqa: E402
 from visualizer import plot_and_save  # noqa: E402
 
@@ -53,6 +54,8 @@ with st.sidebar:
     risk_amount = st.number_input("單筆風險金額（新台幣）", min_value=1000, value=10000, step=1000)
     usd_rate = st.number_input("美元兌台幣參考匯率", min_value=1.0, value=32.0, step=0.5)
     period = st.selectbox("資料回看區間", ["1y", "2y", "3y"], index=1)
+    only_lower_zone = st.checkbox("只顯示下緣型態（低於長期趨勢線）", value=False)
+    enable_daily_refinement = st.checkbox("啟用日K精算停損（週K定方向，日K定打擊區）", value=True)
     st.divider()
     st.caption("⚠️ 本工具僅供型態研究參考，非投資建議。")
     st.caption("全市場掃描約需 1-3 分鐘，視 Yahoo Finance 回應速度而定。")
@@ -84,6 +87,12 @@ with tab_scan:
                 watchlist.append({"ticker": ticker, "name": name, "status": status})
 
             if status == STATUS_TRIGGERED:
+                if enable_daily_refinement:
+                    try:
+                        res = refine_with_daily(ticker, df, res)
+                    except Exception:
+                        res["daily_refined"] = False
+
                 pos = calc_position_size(ticker, res["entry_price"], res["stop_loss"],
                                           risk_amount_twd=risk_amount, usd_twd_rate=usd_rate)
                 try:
@@ -104,11 +113,18 @@ with tab_scan:
     if results is None:
         st.info("按上方按鈕開始掃描。")
     else:
+        display_results = results
+        if only_lower_zone:
+            display_results = [r for r in results if r["res"].get("zone_label") == "下緣"]
+
         if not results:
             st.warning("本次掃描全市場無正式觸發的標的。")
+        elif not display_results:
+            st.warning(f"本次掃描共 {len(results)} 檔觸發，但都不是下緣型態（已套用側邊欄篩選）。")
         else:
-            sorted_results = sorted(results, key=lambda r: r["res"]["rr_ratio"], reverse=True)
-            st.success(f"共找到 {len(sorted_results)} 檔正式觸發的標的（依風報比排序）")
+            sorted_results = sorted(display_results, key=lambda r: r["res"]["rr_ratio"], reverse=True)
+            st.success(f"共找到 {len(sorted_results)} 檔正式觸發的標的（依風報比排序）"
+                       + (f"，已篩選只顯示下緣型態" if only_lower_zone else ""))
 
             table_rows = [
                 {
@@ -122,6 +138,8 @@ with tab_scan:
                     "交割款估計": f"{r['pos']['currency']} {r['pos']['settlement_estimate']:,.0f}" if r["pos"] else "-",
                     "歷史滿足": f"{r['hist']['satisfied_count']}/{r['hist']['total_patterns']}",
                     "打擊區": "⚠️過窄" if r["res"].get("zone_too_tight") else "✅",
+                    "停損來源": "日K精算" if r["res"].get("daily_refined") else "週K版本",
+                    "趨勢位置": f"{r['res'].get('zone_label', '-')}（{r['res'].get('trend_deviation_pct', 0)*100:+.1f}%）",
                 }
                 for r in sorted_results
             ]
@@ -181,6 +199,12 @@ with tab_single:
                 status = res.get("status")
 
                 if status == STATUS_TRIGGERED:
+                    if enable_daily_refinement:
+                        try:
+                            res = refine_with_daily(ticker_input, df, res)
+                        except Exception:
+                            res["daily_refined"] = False
+
                     st.success("✅ 五階段全部通過，符合邊界重塑回踩條件！")
                     pos = calc_position_size(ticker_input, res["entry_price"], res["stop_loss"],
                                               risk_amount_twd=risk_amount, usd_twd_rate=usd_rate)
@@ -191,8 +215,15 @@ with tab_single:
                     c3.metric("停損", f"{res['stop_loss']:.2f}")
                     c4.metric("停利", f"{res['tp_adam']:.2f}")
                     st.metric("風報比 R/R", f"{res['rr_ratio']:.2f}")
+                    if res.get("daily_refined"):
+                        st.caption(f"📐 停損已套用日K精算（{res.get('daily_zone_start_date')} ~ {res.get('daily_zone_end_date')}，共{res.get('daily_zone_bar_count')}根日K）")
+                    elif enable_daily_refinement:
+                        st.caption(f"⚠️ 日K精算失敗，停損維持週K版本計算（原因: {res.get('daily_refine_reason', '未知')}）")
                     if res.get("zone_too_tight"):
                         st.warning("⚠️ 打擊區過窄（反彈高點才發生沒幾根K棒，回檔尚未止穩），停損已套用風險下限（2%），非打擊區實際低點")
+
+                    zone_emoji = "🟢" if res.get("zone_label") == "下緣" else "🔴"
+                    st.caption(f"{zone_emoji} 相對長期趨勢線：{res.get('zone_label')}（{res.get('trend_deviation_pct', 0)*100:+.1f}%，趨勢線價位約 {res.get('trend_price', 0):.2f}）")
 
                     try:
                         hist = historical_satisfaction_score(df)

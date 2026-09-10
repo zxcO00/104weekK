@@ -20,8 +20,19 @@ Telegram / Discord。
    不能在低檔盤整拖太久；記錄反彈高點 Peak，計算翻亞當高度 `pattern_height = Peak - sweep_low`。
 4. **狀態4 滿足區回踩（Retest）**：老余核心戒律「絕不追高突破，只在回踩邊界時吃單」——
    最新K棒須踩進滿足區（動態邊界 ×0.985~1.035）且收盤守穩。
-5. **狀態5 風控與停利定錨（Risk/Reward）**：`Entry = max(邊界, 當前低點)`、
-   `SL = sweep_low × 0.992`、`TP = Entry + pattern_height`，並套用 R/R ≥ 1.05 濾網。
+5. **狀態5 風控與停利定錨（Risk/Reward）**：`Entry = max(邊界, 當前低點)`；停損不用整段
+   型態最深的洗盤低點，改用「回踩打擊區這段期間的實際局部低點」外側緩衝（預設1%），
+   打擊區過窄時套用風險下限（預設2%）；`TP = Entry + pattern_height`；套用 R/R ≥ 1.05 濾網。
+
+### 雙時間週期：週K定方向，日K精算打擊區/停損
+
+週K的一根K棒壓縮了5個交易日，低點解析度比日K粗。狀態1~4（大格局邊界、洗盤、收復、
+滿足區回踩）維持用週K判斷，但週K觸發後，`daily_refinement.py` 會另外抓該標的的日K資料
+（從週K反彈高點那週開始，到最新一天），在日K層級重新找「打擊區局部低點」來精算停損——
+進場價與停利維持用週K計算不變。抓不到日K資料時會安靜退回週K版本的數值，不影響訊號本身。
+
+可用 `ENABLE_DAILY_REFINEMENT=0`（GitHub Actions）或側邊欄核取方塊（Streamlit）關閉這個功能，
+回到純週K計算的舊行為。
 
 `detect_boundary_shift()` **永遠回傳一個 dict**（不會是 `None`），帶 `status` 欄位：
 只有 `STATUS_TRIGGERED` 才有完整下單四要素；其餘狀態（`STATUS_WATCHING_SWEEP` /
@@ -42,10 +53,12 @@ Telegram / Discord。
 ```
 ├── .github/workflows/weekly_scan.yml   # 每週五 15:30 台灣時間排程，可手動 workflow_dispatch 測試
 ├── requirements.txt                    # Python 套件（已釘版本）
+├── tradingview/boundary_reset.pine     # TradingView Pine Script v5 版本（手動看盤用，跟 Python 版平行維護）
 └── src/
-    ├── scanner.py           # 主流程：下載 -> 五階段狀態機偵測 -> 部位試算 -> 繪圖 -> 推播 -> 產出報告
+    ├── scanner.py           # 主流程：下載 -> 五階段狀態機偵測 -> 日K精算 -> 部位試算 -> 繪圖 -> 推播 -> 產出報告
     ├── data_fetcher.py       # yfinance 批次下載、清洗、分批重試（含 WATCHLIST_MAPPING）
     ├── pattern_detector.py   # detect_boundary_shift()：老余裸K五階段狀態機（永遠回傳 dict，帶 status）
+    ├── daily_refinement.py   # 雙時間週期：用日K資料精算週K觸發後的打擊區局部低點/停損
     ├── historical_satisfaction.py  # 「翻亞當」歷史滿足紀錄前置濾網（信任分數，非即時訊號）
     ├── visualizer.py         # plot_and_save()：中文字型註冊 + 滿足區框 + 四橫線圖
     ├── position_sizing.py    # calc_position_size()：依台股/美股自動切換幣別與成本模型
@@ -62,6 +75,7 @@ Telegram / Discord。
 | `POSITION_RISK_AMOUNT_TWD` | 單筆固定風險金額（新台幣，美股會依匯率換算） | 選填，預設 10000 |
 | `USD_TWD_RATE` | 美元兌台幣參考匯率 | 選填，預設 32.0 |
 | `MIN_HISTORICAL_SATISFACTIONS` | 歷史翻亞當滿足次數門檻（低於此門檻的訊號會被過濾掉） | 選填，預設 0（不過濾，只附加統計資訊） |
+| `ENABLE_DAILY_REFINEMENT` | 是否啟用日K精算打擊區/停損（雙時間週期） | 選填，預設 1（開啟），設 0 關閉退回純週K計算 |
 
 ## Streamlit 網頁版（app.py）
 
