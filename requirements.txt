@@ -1,6 +1,6 @@
-yfinance>=0.2.54
-pandas>=2.2.3
-numpy>=1.26.4
-matplotlib>=3.9.2
-requests>=2.32.3
-streamlit>=1.39.0
+yfinance>=0.2.54,<1.0
+pandas>=2.2.3,<3.0
+numpy>=1.26.4,<2.0
+matplotlib>=3.9.2,<4.0
+requests>=2.32.3,<3.0
+streamlit>=1.39.0,<2.0

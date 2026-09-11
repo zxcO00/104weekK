@@ -60,7 +60,7 @@ Telegram / Discord。
     ├── pattern_detector.py   # detect_boundary_shift()：老余裸K五階段狀態機（永遠回傳 dict，帶 status）
     ├── daily_refinement.py   # 雙時間週期：用日K資料精算週K觸發後的打擊區局部低點/停損
     ├── historical_satisfaction.py  # 「翻亞當」歷史滿足紀錄前置濾網（信任分數，非即時訊號）
-    ├── visualizer.py         # plot_and_save() 週K圖 + plot_daily_chart() 可選日K精算檢視圖
+    ├── visualizer.py         # plot_and_save() 週K圖（含箱型上緣參考壓力線）+ plot_daily_chart() 可選日K精算檢視圖
     ├── position_sizing.py    # calc_position_size()：依台股/美股自動切換幣別與成本模型
     └── notifier.py           # Telegram / Discord webhook 推播 + 失敗告警
 ```
