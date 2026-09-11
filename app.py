@@ -55,6 +55,7 @@ with st.sidebar:
     usd_rate = st.number_input("美元兌台幣參考匯率", min_value=1.0, value=32.0, step=0.5)
     period = st.selectbox("資料回看區間", ["1y", "2y", "3y"], index=1)
     only_lower_zone = st.checkbox("只顯示下緣型態（低於長期趨勢線）", value=False)
+    only_good_zone = st.checkbox("只顯示打擊區品質良好的型態（排除過窄）", value=False)
     enable_daily_refinement = st.checkbox("啟用日K精算停損（週K定方向，日K定打擊區）", value=True)
     show_daily_chart = st.checkbox("顯示日K圖表（可選，需先啟用日K精算）", value=False)
     st.divider()
@@ -116,16 +117,24 @@ with tab_scan:
     else:
         display_results = results
         if only_lower_zone:
-            display_results = [r for r in results if r["res"].get("zone_label") == "下緣"]
+            display_results = [r for r in display_results if r["res"].get("zone_label") == "下緣"]
+        if only_good_zone:
+            display_results = [r for r in display_results if not r["res"].get("zone_too_tight")]
+
+        applied_filters = []
+        if only_lower_zone:
+            applied_filters.append("下緣型態")
+        if only_good_zone:
+            applied_filters.append("打擊區品質良好")
+        filter_note = f"，已篩選：{' + '.join(applied_filters)}" if applied_filters else ""
 
         if not results:
             st.warning("本次掃描全市場無正式觸發的標的。")
         elif not display_results:
-            st.warning(f"本次掃描共 {len(results)} 檔觸發，但都不是下緣型態（已套用側邊欄篩選）。")
+            st.warning(f"本次掃描共 {len(results)} 檔觸發，但沒有標的同時符合篩選條件（{' + '.join(applied_filters)}）。")
         else:
             sorted_results = sorted(display_results, key=lambda r: r["res"]["rr_ratio"], reverse=True)
-            st.success(f"共找到 {len(sorted_results)} 檔正式觸發的標的（依風報比排序）"
-                       + (f"，已篩選只顯示下緣型態" if only_lower_zone else ""))
+            st.success(f"共找到 {len(sorted_results)} 檔正式觸發的標的（依風報比排序）{filter_note}")
 
             table_rows = [
                 {
