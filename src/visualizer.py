@@ -85,6 +85,45 @@ def setup_chinese_font(font_dir="fonts"):
     _FONT_READY = True
 
 
+def _fit_reference_resistance_line(df, sweep_idx, lookback_window=12):
+    """
+    純視覺輔助：抓出「箱型上緣」的參考壓力線，用線性回歸擬合這段期間的
+    High 值。這條線完全不參與任何觸發判斷，只是畫在圖上，方便使用者
+    對照「兩條線夾出的箱型」（合作夥伴訓練表裡提到的箱型通道概念）。
+
+    時間窗口跟狀態1找支撐邊界時用的窗口一致（sweep_idx 往前 lookback_window
+    根，到目前最新一根），這樣上緣線跟下緣支撐線涵蓋的是同一段箱型。
+    """
+    if sweep_idx is None:
+        return None
+
+    start_idx = max(sweep_idx - lookback_window, 0)
+    window = df.iloc[start_idx:]
+    if len(window) < 2:
+        return None
+
+    x = np.arange(len(window))
+    y = window["High"].values
+    slope, intercept = np.polyfit(x, y, 1)
+    return {"slope": slope, "intercept": intercept, "start_idx": start_idx}
+
+
+def _draw_reference_resistance_line(ax, df, res):
+    """在圖上畫出箱型上緣的參考壓力線（僅供對照，不影響任何判斷邏輯）"""
+    resistance = _fit_reference_resistance_line(df, res.get("sweep_idx"))
+    if resistance is None:
+        return
+
+    start_idx = resistance["start_idx"]
+    n = len(df) - start_idx
+    x_local = np.arange(n)
+    y_res = resistance["intercept"] + resistance["slope"] * x_local
+    x_plot = np.arange(start_idx, len(df))
+
+    ax.plot(x_plot, y_res, color="#FF69B4", linestyle="-", linewidth=1.5, alpha=0.7,
+            label="箱型上緣（參考，不影響判斷）")
+
+
 def plot_and_save(df, ticker, name, res, output_dir="output"):
     setup_chinese_font()
 
@@ -124,6 +163,9 @@ def plot_and_save(df, ticker, name, res, output_dir="output"):
     ax1.vlines(x_indices[down], df.loc[down, "Low"], df.loc[down, "High"], color="#00F5FF", linewidth=1.2)
     ax1.bar(x_indices[down], df.loc[down, "Open"] - df.loc[down, "Close"], width,
             bottom=df.loc[down, "Close"], color="#00F5FF", edgecolor="#00F5FF")
+
+    # 箱型上緣參考壓力線（純視覺輔助，不影響任何判斷邏輯）
+    _draw_reference_resistance_line(ax1, df, res)
 
     # 打擊區（黃框）—— 包覆最新回踩K棒的實際密集重疊區，而非固定百分比帶
     last_x = len(df) - 1
